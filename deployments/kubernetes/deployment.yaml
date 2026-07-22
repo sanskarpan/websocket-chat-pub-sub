@@ -1,0 +1,104 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: chat-server
+  labels:
+    app: chat-server
+spec:
+  replicas: 3
+  selector:
+    matchLabels:
+      app: chat-server
+  template:
+    metadata:
+      labels:
+        app: chat-server
+    spec:
+      containers:
+      - name: server
+        image: chat-server:latest
+        ports:
+        - containerPort: 8085
+          name: websocket
+        - containerPort: 9090
+          name: metrics
+        env:
+        - name: APP_ENVIRONMENT
+          value: "production"
+        - name: DB_PASSWORD
+          valueFrom:
+            secretKeyRef:
+              name: chat-secrets
+              key: db-password
+        - name: JWT_SECRET
+          valueFrom:
+            secretKeyRef:
+              name: chat-secrets
+              key: jwt-secret
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 5
+          periodSeconds: 5
+        volumeMounts:
+        - name: config
+          mountPath: /app/configs
+      volumes:
+      - name: config
+        configMap:
+          name: chat-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: chat-server
+spec:
+  selector:
+    app: chat-server
+  ports:
+  - name: websocket
+    port: 8085
+    targetPort: 8085
+  - name: metrics
+    port: 9090
+    targetPort: 9090
+  type: ClusterIP
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: chat-config
+data:
+  config.yaml: |
+    app:
+      name: "websocket-chat"
+      version: "1.0.0"
+      environment: "production"
+    server:
+      host: "0.0.0.0"
+      port: 8080
+    redis:
+      mode: "cluster"
+      addrs:
+        - "redis:6379"
+    database:
+      postgresql:
+        host: "postgres"
+        port: 5432
+        database: "chat"
+        user: "chat"
+        ssl_mode: "disable"
