@@ -9,17 +9,14 @@ import (
 	"github.com/websocket-chat/internal/config"
 )
 
-type Closer interface {
-	Close() error
+type LoggerHandle struct {
+	Logger *zerolog.Logger
+	Closer io.Closer
 }
 
-type nopCloser struct{}
-
-func (n nopCloser) Close() error { return nil }
-
-func NewLogger(cfg *config.Config) *zerolog.Logger {
+func NewLogger(cfg *config.Config) *LoggerHandle {
 	var output io.Writer = os.Stdout
-	var closer Closer = nopCloser{}
+	var closer io.Closer = nopCloser{}
 
 	if cfg.Observability.Logging.Output == "file" && cfg.Observability.Logging.FilePath != "" {
 		file, err := os.OpenFile(
@@ -58,9 +55,15 @@ func NewLogger(cfg *config.Config) *zerolog.Logger {
 			Logger()
 	}
 
-	_ = closer
-	return &logger
+	return &LoggerHandle{
+		Logger: &logger,
+		Closer: closer,
+	}
 }
+
+type nopCloser struct{}
+
+func (n nopCloser) Close() error { return nil }
 
 func parseLevel(level string) zerolog.Level {
 	l, err := zerolog.ParseLevel(level)

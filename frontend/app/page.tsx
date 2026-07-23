@@ -72,6 +72,17 @@ export default function ChatApp() {
     scrollToBottom()
   }, [messages, scrollToBottom])
 
+  useEffect(() => {
+    const storedToken = localStorage.getItem('token')
+    const storedRefresh = localStorage.getItem('refresh_token')
+    if (storedToken && storedRefresh) {
+      setToken(storedToken)
+      setShowLogin(false)
+      connect(storedToken)
+      fetchRooms(storedToken)
+    }
+  }, [])
+
   const connect = useCallback((authToken: string) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.close()
@@ -156,23 +167,22 @@ export default function ChatApp() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email, password })
       })
-      
+
       if (res.ok) {
         const data = await res.json()
         setToken(data.access_token)
         localStorage.setItem('token', data.access_token)
+        localStorage.setItem('refresh_token', data.refresh_token)
         connect(data.access_token)
         setShowLogin(false)
         fetchRooms(data.access_token)
       } else {
-        alert('Login failed')
+        const error = await res.json().catch(() => ({ message: 'Login failed' }))
+        alert(`Login failed: ${error.message || 'Invalid credentials'}`)
       }
     } catch (e) {
       console.error('Login error:', e)
-      setShowLogin(false)
-      setToken('demo-token')
-      setIsConnected(true)
-      loadDemoData()
+      alert('Unable to reach the server. Please try again later.')
     }
   }
 
@@ -181,27 +191,24 @@ export default function ChatApp() {
       const res = await fetch(`${API_URL}/api/v1/auth/register`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ 
-          username, 
-          email, 
+        body: JSON.stringify({
+          username,
+          email,
           password,
-          display_name: username 
+          display_name: username
         })
       })
-      
+
       if (res.ok) {
         setIsRegistering(false)
         alert('Registration successful! Please login.')
       } else {
-        alert('Registration failed')
+        const error = await res.json().catch(() => ({ message: 'Registration failed' }))
+        alert(`Registration failed: ${error.message || 'Unknown error'}`)
       }
     } catch (e) {
       console.error('Register error:', e)
-      setIsRegistering(false)
-      setShowLogin(false)
-      setToken('demo-token')
-      setIsConnected(true)
-      loadDemoData()
+      alert('Unable to reach the server. Please try again later.')
     }
   }
 
@@ -213,28 +220,14 @@ export default function ChatApp() {
       if (res.ok) {
         const data = await res.json()
         setRooms(data)
+      } else {
+        console.error('Failed to fetch rooms, status:', res.status)
+        setRooms([])
       }
     } catch (e) {
-      loadDemoData()
+      console.error('Failed to fetch rooms:', e)
+      setRooms([])
     }
-  }
-
-  const loadDemoData = () => {
-    setRooms([
-      { id: '1', name: 'general', type: 'channel', member_count: 24 },
-      { id: '2', name: 'random', type: 'channel', member_count: 18 },
-      { id: '3', name: 'development', type: 'channel', member_count: 12 },
-      { id: '4', name: 'Alice', type: 'direct', member_count: 2 },
-      { id: '5', name: 'Bob', type: 'direct', member_count: 2 },
-    ])
-    setSelectedRoom({ id: '1', name: 'general', type: 'channel', member_count: 24 })
-    setMessages([
-      { id: '1', room_id: '1', user_id: 'u1', content: 'Hey everyone! 👋', content_type: 'text', created_at: new Date(Date.now() - 3600000).toISOString(), user: { id: 'u1', username: 'alice', display_name: 'Alice', status: 'online' } },
-      { id: '2', room_id: '1', user_id: 'u2', content: 'Hi Alice! How\'s it going?', content_type: 'text', created_at: new Date(Date.now() - 3000000).toISOString(), user: { id: 'u2', username: 'bob', display_name: 'Bob', status: 'online' } },
-      { id: '3', room_id: '1', user_id: 'u1', content: 'Great! Working on the new feature. How about you?', content_type: 'text', created_at: new Date(Date.now() - 2400000).toISOString(), user: { id: 'u1', username: 'alice', display_name: 'Alice', status: 'online' } },
-      { id: '4', room_id: '1', user_id: 'u3', content: 'Just finished the API integration. It\'s working nicely!', content_type: 'text', created_at: new Date(Date.now() - 1800000).toISOString(), user: { id: 'u3', username: 'charlie', display_name: 'Charlie', status: 'away' } },
-      { id: '5', room_id: '1', user_id: 'u2', content: 'Nice! Can\'t wait to see it in action 🎉', content_type: 'text', created_at: new Date(Date.now() - 1200000).toISOString(), user: { id: 'u2', username: 'bob', display_name: 'Bob', status: 'online' } },
-    ])
   }
 
   const handleLogout = () => {
@@ -246,6 +239,7 @@ export default function ChatApp() {
     setMessages([])
     setSelectedRoom(null)
     localStorage.removeItem('token')
+    localStorage.removeItem('refresh_token')
   }
 
   if (showLogin) {

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/websocket-chat/internal/cache"
@@ -11,16 +12,18 @@ import (
 )
 
 type RoomService struct {
-	roomRepo   *repository.RoomRepository
-	userRepo   *repository.UserRepository
+	roomRepo   repository.IRoomRepository
+	userRepo   repository.IUserRepository
 	redisCache cache.Cache
+	ps         pubsub.PubSub
 }
 
-func NewRoomService(roomRepo *repository.RoomRepository, userRepo *repository.UserRepository, redisCache cache.Cache) *RoomService {
+func NewRoomService(roomRepo repository.IRoomRepository, userRepo repository.IUserRepository, redisCache cache.Cache, ps pubsub.PubSub) *RoomService {
 	return &RoomService{
 		roomRepo:   roomRepo,
 		userRepo:   userRepo,
 		redisCache: redisCache,
+		ps:         ps,
 	}
 }
 
@@ -48,16 +51,11 @@ func (s *RoomService) Create(ctx context.Context, input CreateRoomInput) (*model
 		MemberCount: 1,
 	}
 
-	if err := s.roomRepo.Create(ctx, room); err != nil {
-		return nil, err
-	}
-
-	member := &model.RoomMember{
-		RoomID:     room.ID,
-		UserID:     input.CreatedBy,
-		Role:       model.RoleOwner,
-		JoinedAt:   time.Now(),
-		LastReadAt: time.Now(),
+	owner := &model.RoomMember{
+		RoomID:   "",
+		UserID:   input.CreatedBy,
+		Role:     model.RoleOwner,
+		JoinedAt: time.Now(),
 		Notifications: model.NotificationSettings{
 			Enabled:      true,
 			MentionsOnly: false,
@@ -65,7 +63,7 @@ func (s *RoomService) Create(ctx context.Context, input CreateRoomInput) (*model
 		},
 	}
 
-	if err := s.roomRepo.AddMember(ctx, member); err != nil {
+	if err := s.roomRepo.CreateRoomWithOwner(ctx, room, owner); err != nil {
 		return nil, err
 	}
 
@@ -152,14 +150,23 @@ func (s *RoomService) IsMember(ctx context.Context, roomID, userID string) (bool
 	return s.roomRepo.IsMember(ctx, roomID, userID)
 }
 
-func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pubsub.PubSub) error {
-	isMember, err := s.roomRepo.IsMember(ctx, roomID, userID)
-	if err != nil {
-		return err
+func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string) error {
+	if _, err := s.roomRepo.GetByID(ctx, roomID); err != nil {
+		return errors.New("room not found")
 	}
 
-	if !isMember {
-		member := &model.RoomMember{
+	member, err := s.roomRepo.GetMember(ctx, roomID, userID)
+	if err == nil && member != nil {
+		if member.BannedAt != nil {
+			return errors.New("user is banned from this room")
+		}
+		if member.LeftAt == nil {
+			return nil
+		}
+	}
+
+	if member == nil {
+		newMember := &model.RoomMember{
 			RoomID:     roomID,
 			UserID:     userID,
 			Role:       model.RoleMember,
@@ -171,27 +178,47 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pu
 				Sound:        true,
 			},
 		}
-		if err := s.roomRepo.AddMember(ctx, member); err != nil {
+		if err := s.roomRepo.JoinRoomTx(ctx, newMember); err != nil {
 			return err
+		}
+		if s.redisCache != nil {
+			s.redisCache.Del(ctx, "room:"+roomID)
 		}
 	}
 
-	if ps != nil {
-		ps.SubscribeToRoom(ctx, roomID, userID)
+	if s.ps != nil {
+		s.ps.SubscribeToRoom(ctx, roomID, userID)
 	}
 
 	return nil
 }
 
-func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string, ps pubsub.PubSub) error {
-	err := s.roomRepo.RemoveMember(ctx, roomID, userID)
-	if err != nil {
-		return err
+func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string) error {
+	if _, err := s.roomRepo.GetMember(ctx, roomID, userID); err != nil {
+		return errors.New("not a member of this room")
 	}
 
-	if ps != nil {
-		ps.UnsubscribeFromRoom(ctx, roomID, userID)
+	if err := s.roomRepo.LeaveRoomTx(ctx, roomID, userID); err != nil {
+		return err
+	}
+	if s.redisCache != nil {
+		s.redisCache.Del(ctx, "room:"+roomID)
+	}
+
+	if s.ps != nil {
+		s.ps.UnsubscribeFromRoom(ctx, roomID, userID)
 	}
 
 	return nil
+}
+
+func (s *RoomService) MarkRead(ctx context.Context, roomID, userID, messageID string) error {
+	isMember, err := s.roomRepo.IsMember(ctx, roomID, userID)
+	if err != nil {
+		return err
+	}
+	if !isMember {
+		return errors.New("not a member of this room")
+	}
+	return s.roomRepo.MarkRead(ctx, roomID, userID, messageID)
 }
