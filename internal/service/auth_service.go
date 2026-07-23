@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"crypto/rsa"
 	"errors"
 	"fmt"
 	"time"
@@ -11,6 +12,7 @@ import (
 	"github.com/websocket-chat/internal/config"
 	"github.com/websocket-chat/internal/model"
 	"github.com/websocket-chat/internal/repository"
+	"github.com/websocket-chat/internal/tracing"
 	"github.com/websocket-chat/pkg/sanitization"
 	"github.com/websocket-chat/pkg/validator"
 	"golang.org/x/crypto/bcrypt"
@@ -30,11 +32,24 @@ type AuthService struct {
 	userRepo         repository.IUserRepository
 	tokenInvalidator TokenInvalidator
 	dummyHash        []byte
+	rsaPrivateKey    *rsa.PrivateKey
+	rsaPublicKey     *rsa.PublicKey
 }
 
 func NewAuthService(cfg *config.Config, userRepo repository.IUserRepository) *AuthService {
 	dummyHash, _ := bcrypt.GenerateFromPassword([]byte("dummy-password-for-timing-attack-mitigation"), bcrypt.MinCost)
-	return &AuthService{cfg: cfg, userRepo: userRepo, dummyHash: dummyHash}
+
+	var rsaPriv *rsa.PrivateKey
+	var rsaPub *rsa.PublicKey
+
+	if key, err := jwt.ParseRSAPrivateKeyFromPEM([]byte(cfg.Auth.JWT.PrivateKey)); err == nil {
+		rsaPriv = key
+	}
+	if key, err := jwt.ParseRSAPublicKeyFromPEM([]byte(cfg.Auth.JWT.PublicKey)); err == nil {
+		rsaPub = key
+	}
+
+	return &AuthService{cfg: cfg, userRepo: userRepo, dummyHash: dummyHash, rsaPrivateKey: rsaPriv, rsaPublicKey: rsaPub}
 }
 
 func (s *AuthService) SetTokenInvalidator(inv TokenInvalidator) {
@@ -59,6 +74,8 @@ type TokenPair struct {
 }
 
 func (s *AuthService) Register(ctx context.Context, input RegisterInput) (*model.User, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "auth.register")
+	defer spanEnd()
 	input.Username = sanitization.SanitizeUsername(input.Username)
 	input.Email = validator.SanitizeString(input.Email)
 	input.DisplayName = sanitization.SanitizeMessage(input.DisplayName)
@@ -104,6 +121,8 @@ func (s *AuthService) Register(ctx context.Context, input RegisterInput) (*model
 }
 
 func (s *AuthService) Login(ctx context.Context, input LoginInput) (*TokenPair, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "auth.login")
+	defer spanEnd()
 	user, err := s.userRepo.GetByEmail(ctx, input.Email)
 	if err != nil {
 		bcrypt.CompareHashAndPassword(s.dummyHash, []byte(input.Password))
@@ -131,49 +150,9 @@ func (s *AuthService) Login(ctx context.Context, input LoginInput) (*TokenPair, 
 }
 
 func (s *AuthService) ValidateToken(ctx context.Context, tokenString string) (*model.User, error) {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, ErrInvalidToken
-		}
-		return []byte(s.cfg.Auth.JWT.PrivateKey), nil
-	}, jwt.WithIssuer(s.cfg.Auth.JWT.Issuer))
-
-	if err != nil {
-		if errors.Is(err, jwt.ErrTokenExpired) {
-			return nil, ErrTokenExpired
-		}
-		return nil, ErrInvalidToken
-	}
-
-	if !token.Valid {
-		return nil, ErrInvalidToken
-	}
-
-	claims, ok := token.Claims.(jwt.MapClaims)
-	if !ok {
-		return nil, ErrInvalidToken
-	}
-
-	if !s.validateAudience(claims) {
-		return nil, ErrInvalidToken
-	}
-
-	tokenType, ok := claims["type"].(string)
-	if !ok || tokenType != "access" {
-		return nil, ErrInvalidTokenType
-	}
-
-	userID, ok := claims["sub"].(string)
-	if !ok {
-		return nil, ErrInvalidToken
-	}
-
-	user, err := s.userRepo.GetByID(ctx, userID)
-	if err != nil {
-		return nil, ErrInvalidToken
-	}
-
-	return user, nil
+	ctx, spanEnd := tracing.StartSpan(ctx, "auth.validate_token")
+	defer spanEnd()
+	return s.validateToken(ctx, tokenString, "access")
 }
 
 func (s *AuthService) validateAudience(claims jwt.MapClaims) bool {
@@ -208,11 +187,34 @@ func (s *AuthService) validateAudience(claims jwt.MapClaims) bool {
 }
 
 func (s *AuthService) ValidateRefreshToken(ctx context.Context, tokenString string) (*model.User, error) {
+	user, err := s.validateToken(ctx, tokenString, "refresh")
+	if err != nil {
+		return nil, err
+	}
+
+	if s.tokenInvalidator != nil {
+		var parser jwt.Parser
+		claims := jwt.MapClaims{}
+		_, _, err := parser.ParseUnverified(tokenString, claims)
+		if err == nil {
+			if jti, ok := claims["jti"].(string); ok && jti != "" {
+				invalidated, err := s.tokenInvalidator.IsTokenInvalidated(ctx, jti)
+				if err == nil && invalidated {
+					return nil, ErrInvalidToken
+				}
+			}
+		}
+	}
+
+	return user, nil
+}
+
+func (s *AuthService) validateToken(ctx context.Context, tokenString string, expectedType string) (*model.User, error) {
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, ErrInvalidToken
 		}
-		return []byte(s.cfg.Auth.JWT.PrivateKey), nil
+		return s.rsaPublicKey, nil
 	}, jwt.WithIssuer(s.cfg.Auth.JWT.Issuer))
 
 	if err != nil {
@@ -231,22 +233,13 @@ func (s *AuthService) ValidateRefreshToken(ctx context.Context, tokenString stri
 		return nil, ErrInvalidToken
 	}
 
-	tokenType, ok := claims["type"].(string)
-	if !ok || tokenType != "refresh" {
-		return nil, ErrInvalidTokenType
-	}
-
 	if !s.validateAudience(claims) {
 		return nil, ErrInvalidToken
 	}
 
-	if s.tokenInvalidator != nil {
-		if jti, ok := claims["jti"].(string); ok && jti != "" {
-			invalidated, err := s.tokenInvalidator.IsTokenInvalidated(ctx, jti)
-			if err == nil && invalidated {
-				return nil, ErrInvalidToken
-			}
-		}
+	tokenType, ok := claims["type"].(string)
+	if !ok || tokenType != expectedType {
+		return nil, ErrInvalidTokenType
 	}
 
 	userID, ok := claims["sub"].(string)
@@ -263,11 +256,13 @@ func (s *AuthService) ValidateRefreshToken(ctx context.Context, tokenString stri
 }
 
 func (s *AuthService) RefreshToken(ctx context.Context, refreshToken string) (*TokenPair, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "auth.refresh_token")
+	defer spanEnd()
 	parsed, err := jwt.Parse(refreshToken, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+		if _, ok := token.Method.(*jwt.SigningMethodRSA); !ok {
 			return nil, ErrInvalidToken
 		}
-		return []byte(s.cfg.Auth.JWT.PrivateKey), nil
+		return s.rsaPublicKey, nil
 	}, jwt.WithIssuer(s.cfg.Auth.JWT.Issuer))
 	if err != nil {
 		if errors.Is(err, jwt.ErrTokenExpired) {
@@ -357,8 +352,8 @@ func (s *AuthService) generateAccessToken(user *model.User) (string, error) {
 		"aud":  s.cfg.Auth.JWT.Audience,
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.cfg.Auth.JWT.PrivateKey))
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	return token.SignedString(s.rsaPrivateKey)
 }
 
 func (s *AuthService) generateRefreshToken(user *model.User) (string, error) {
@@ -373,6 +368,6 @@ func (s *AuthService) generateRefreshToken(user *model.User) (string, error) {
 		"aud":  s.cfg.Auth.JWT.Audience,
 	}
 
-	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	return token.SignedString([]byte(s.cfg.Auth.JWT.PrivateKey))
+	token := jwt.NewWithClaims(jwt.SigningMethodRS256, claims)
+	return token.SignedString(s.rsaPrivateKey)
 }
