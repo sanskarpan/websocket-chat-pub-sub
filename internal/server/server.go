@@ -802,6 +802,15 @@ func (c *Client) WritePump() {
 	}
 }
 
+func (c *Client) isSubscribed(roomID string) bool {
+	c.hub.mu.RLock()
+	defer c.hub.mu.RUnlock()
+	if subs, ok := c.hub.rooms[roomID]; ok {
+		return subs[c.id]
+	}
+	return false
+}
+
 func (c *Client) drainAndClose() {
 	if c.closedInProgress.Swap(true) {
 		return
@@ -856,16 +865,23 @@ func (c *Client) handleSubscribe(ctx context.Context, msg protocol.ClientMessage
 		return
 	}
 
+	subscribed := 0
 	for _, roomID := range data.RoomIDs {
 		isMember, _ := c.roomService.IsMember(ctx, roomID, c.userID)
 		if isMember {
 			c.hub.SubscribeToRoom(c, roomID)
+			subscribed++
 		}
+	}
+
+	status := "subscribed"
+	if subscribed == 0 && len(data.RoomIDs) > 0 {
+		status = "not_subscribed"
 	}
 
 	ack, err := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
 		ClientMsgID: msg.ID,
-		Status:      "subscribed",
+		Status:      status,
 	})
 	if err != nil {
 		c.logger.Error().Err(err).Msg("Failed to create ack message")
@@ -913,6 +929,11 @@ func (c *Client) handleChatMessage(ctx context.Context, msg protocol.ClientMessa
 	isMember, err := c.roomService.IsMember(ctx, data.RoomID, c.userID)
 	if err != nil || !isMember {
 		c.sendError(msg.ID, "FORBIDDEN", "not a member of this room")
+		return
+	}
+
+	if !c.isSubscribed(data.RoomID) {
+		c.sendError(msg.ID, "NOT_SUBSCRIBED", "must subscribe to room before sending messages")
 		return
 	}
 
@@ -977,6 +998,10 @@ func (c *Client) handleTyping(ctx context.Context, msg protocol.ClientMessage) {
 
 	isMember, _ := c.roomService.IsMember(ctx, data.RoomID, c.userID)
 	if !isMember {
+		return
+	}
+
+	if !c.isSubscribed(data.RoomID) {
 		return
 	}
 

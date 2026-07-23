@@ -3,6 +3,7 @@ package service_test
 import (
 	"context"
 	"errors"
+	"strings"
 	"sync"
 	"time"
 
@@ -85,7 +86,10 @@ func (r *FakeUserRepository) Search(ctx context.Context, query string, limit int
 	r.mu.RLock()
 	defer r.mu.RUnlock()
 	var results []*model.User
-	for _, u := range r.users {
+	for k, u := range r.users {
+		if strings.HasPrefix(k, "username:") || strings.HasPrefix(k, "email:") {
+			continue
+		}
 		if len(results) >= limit {
 			break
 		}
