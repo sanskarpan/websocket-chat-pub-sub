@@ -1,12 +1,37 @@
 package config
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"errors"
 	"os"
 	"time"
 
 	"github.com/spf13/viper"
 )
+
+func generateRSAKeys() (privPEM, pubPEM string, err error) {
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	if err != nil {
+		return "", "", err
+	}
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	if err != nil {
+		return "", "", err
+	}
+	privPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}))
+
+	pubBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	if err != nil {
+		return "", "", err
+	}
+	pubPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}))
+
+	return privPEM, pubPEM, nil
+}
 
 type Config struct {
 	App           AppConfig           `mapstructure:"app"`
@@ -17,7 +42,6 @@ type Config struct {
 	RateLimit     RateLimitConfig     `mapstructure:"rate_limit"`
 	Features      FeaturesConfig      `mapstructure:"features"`
 	Observability ObservabilityConfig `mapstructure:"observability"`
-	Storage       StorageConfig       `mapstructure:"storage"`
 }
 
 type AppConfig struct {
@@ -91,8 +115,10 @@ type AuthConfig struct {
 
 type JWTConfig struct {
 	Algorithm       string        `mapstructure:"algorithm"`
-	PrivateKey      string        `mapstructure:"private_key"`
-	PublicKey       string        `mapstructure:"public_key"`
+	PrivateKeyPath  string        `mapstructure:"private_key_path"`
+	PublicKeyPath   string        `mapstructure:"public_key_path"`
+	PrivateKey      string        `mapstructure:"-"`
+	PublicKey       string        `mapstructure:"-"`
 	AccessTokenTTL  time.Duration `mapstructure:"access_token_ttl"`
 	RefreshTokenTTL time.Duration `mapstructure:"refresh_token_ttl"`
 	Issuer          string        `mapstructure:"issuer"`
@@ -150,32 +176,13 @@ type TracingConfig struct {
 	SamplingRate float64 `mapstructure:"sampling_rate"`
 }
 
-type StorageConfig struct {
-	Type  string      `mapstructure:"type"`
-	MinIO MinIOConfig `mapstructure:"minio"`
-	S3    S3Config    `mapstructure:"s3"`
-}
-
-type MinIOConfig struct {
-	Endpoint  string `mapstructure:"endpoint"`
-	AccessKey string `mapstructure:"access_key"`
-	SecretKey string `mapstructure:"secret_key"`
-	Bucket    string `mapstructure:"bucket"`
-	UseSSL    bool   `mapstructure:"use_ssl"`
-}
-
-type S3Config struct {
-	Region string `mapstructure:"region"`
-	Bucket string `mapstructure:"bucket"`
-}
-
 func (c *Config) Validate() error {
 	if c.App.Environment == "production" {
-		if c.Auth.JWT.PrivateKey == "" || c.Auth.JWT.PrivateKey == "default-secret-change-in-production" {
-			return errors.New("production environment requires a secure JWT_SECRET environment variable")
+		if c.Auth.JWT.PrivateKey == "" {
+			return errors.New("production environment requires a valid JWT private key (set private_key_path, JWT_PRIVATE_KEY env var, or JWT_PUBLIC_KEY env var)")
 		}
-		if len(c.Auth.JWT.PrivateKey) < 32 {
-			return errors.New("JWT_SECRET must be at least 32 characters long in production")
+		if c.Auth.JWT.PublicKey == "" {
+			return errors.New("production environment requires a valid JWT public key (set public_key_path or JWT_PUBLIC_KEY env var)")
 		}
 		if c.Database.Postgresql.Password == "" {
 			return errors.New("production environment requires DB_PASSWORD environment variable")
@@ -196,13 +203,37 @@ func Load() *Config {
 		_ = viper.Unmarshal(cfg)
 	}
 
-	if envSecret := os.Getenv("JWT_SECRET"); envSecret != "" {
-		cfg.Auth.JWT.PrivateKey = envSecret
-		cfg.Auth.JWT.PublicKey = envSecret
+	// Load RSA keys from file paths (first priority)
+	if cfg.Auth.JWT.PrivateKeyPath != "" {
+		if data, err := os.ReadFile(cfg.Auth.JWT.PrivateKeyPath); err == nil {
+			cfg.Auth.JWT.PrivateKey = string(data)
+		}
 	}
+	if cfg.Auth.JWT.PublicKeyPath != "" {
+		if data, err := os.ReadFile(cfg.Auth.JWT.PublicKeyPath); err == nil {
+			cfg.Auth.JWT.PublicKey = string(data)
+		}
+	}
+
+	// Fall back to env vars (second priority)
 	if cfg.Auth.JWT.PrivateKey == "" {
-		cfg.Auth.JWT.PrivateKey = "development-secret-key-change-in-production-32bytes!"
-		cfg.Auth.JWT.PublicKey = cfg.Auth.JWT.PrivateKey
+		if envKey := os.Getenv("JWT_PRIVATE_KEY"); envKey != "" {
+			cfg.Auth.JWT.PrivateKey = envKey
+		}
+	}
+	if cfg.Auth.JWT.PublicKey == "" {
+		if envKey := os.Getenv("JWT_PUBLIC_KEY"); envKey != "" {
+			cfg.Auth.JWT.PublicKey = envKey
+		}
+	}
+
+	// Auto-generate development keys if nothing is set (third priority)
+	if cfg.Auth.JWT.PrivateKey == "" || cfg.Auth.JWT.PublicKey == "" {
+		privPEM, pubPEM, err := generateRSAKeys()
+		if err == nil {
+			cfg.Auth.JWT.PrivateKey = privPEM
+			cfg.Auth.JWT.PublicKey = pubPEM
+		}
 	}
 
 	if envDbPass := os.Getenv("DB_PASSWORD"); envDbPass != "" {
@@ -269,9 +300,9 @@ func defaultConfig() *Config {
 		},
 		Auth: AuthConfig{
 			JWT: JWTConfig{
-				Algorithm:       "HS256",
-				PrivateKey:      os.Getenv("JWT_SECRET"),
-				PublicKey:       os.Getenv("JWT_SECRET"),
+				Algorithm:       "RS256",
+				PrivateKeyPath:  "",
+				PublicKeyPath:   "",
 				AccessTokenTTL:  15 * time.Minute,
 				RefreshTokenTTL: 168 * time.Hour,
 				Issuer:          "chat-app",
