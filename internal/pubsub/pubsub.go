@@ -4,7 +4,6 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -22,6 +21,8 @@ type PubSub interface {
 	UnsubscribeFromRoom(ctx context.Context, roomID, userID string) error
 	GetRoomSubscribers(ctx context.Context, roomID string) ([]string, error)
 	CheckRateLimit(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
+	InvalidateToken(ctx context.Context, jti string, ttl time.Duration) error
+	IsTokenInvalidated(ctx context.Context, jti string) (bool, error)
 	Close() error
 }
 
@@ -37,7 +38,6 @@ type PatternSubscriber interface {
 
 type RedisPubSub struct {
 	client *redis.Client
-	mu     sync.RWMutex
 }
 
 type Config struct {
@@ -145,15 +145,34 @@ func (p *RedisPubSub) GetPresence(ctx context.Context, userID string) (*model.Pr
 }
 
 func (p *RedisPubSub) GetPresences(ctx context.Context, userIDs []string) (map[string]*model.Presence, error) {
+	if len(userIDs) == 0 {
+		return make(map[string]*model.Presence), nil
+	}
+
+	keys := make([]string, len(userIDs))
+	for i, userID := range userIDs {
+		keys[i] = "presence:" + userID
+	}
+
+	values, err := p.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+
 	result := make(map[string]*model.Presence)
-	for _, userID := range userIDs {
-		presence, err := p.GetPresence(ctx, userID)
-		if err != nil {
+	for i, val := range values {
+		if val == nil {
 			continue
 		}
-		if presence != nil {
-			result[userID] = presence
+		strVal, ok := val.(string)
+		if !ok {
+			continue
 		}
+		var presence model.Presence
+		if err := json.Unmarshal([]byte(strVal), &presence); err != nil {
+			continue
+		}
+		result[userIDs[i]] = &presence
 	}
 	return result, nil
 }
@@ -193,25 +212,50 @@ func (p *RedisPubSub) GetRoomSubscribers(ctx context.Context, roomID string) ([]
 	return p.client.SMembers(ctx, key).Result()
 }
 
+var rateLimitLuaScript = redis.NewScript(`
+	local key = KEYS[1]
+	local now = tonumber(ARGV[1])
+	local window = tonumber(ARGV[2])
+	local limit = tonumber(ARGV[3])
+	local member = ARGV[4]
+
+	redis.call('ZREMRANGEBYSCORE', key, 0, now - window)
+	local count = redis.call('ZCARD', key)
+	if count >= limit then
+		return 0
+	end
+	redis.call('ZADD', key, now, member)
+	redis.call('PEXPIRE', key, math.ceil(window / 1000000))
+	return 1
+`)
+
 func (p *RedisPubSub) CheckRateLimit(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
 	rateKey := "ratelimit:" + key
 	now := time.Now().UnixNano()
+	member := strconv.FormatInt(now, 10)
 
-	pipe := p.client.Pipeline()
-	pipe.ZRemRangeByScore(ctx, rateKey, "0", strconv.FormatInt(now-int64(window), 10))
-	pipe.ZAdd(ctx, rateKey, redis.Z{Score: float64(now), Member: now})
-	pipe.ZCard(ctx, rateKey)
-	pipe.Expire(ctx, rateKey, window)
-
-	results, err := pipe.Exec(ctx)
+	windowNs := int64(window)
+	result, err := rateLimitLuaScript.Run(ctx, p.client, []string{rateKey}, now, windowNs, limit, member).Int()
 	if err != nil {
 		return false, err
 	}
-
-	count := results[2].(*redis.IntCmd).Val()
-	return int(count) <= limit, nil
+	return result == 1, nil
 }
 
 func (p *RedisPubSub) Close() error {
 	return p.client.Close()
+}
+
+func (p *RedisPubSub) InvalidateToken(ctx context.Context, jti string, ttl time.Duration) error {
+	key := "token:blacklist:" + jti
+	return p.client.Set(ctx, key, "1", ttl).Err()
+}
+
+func (p *RedisPubSub) IsTokenInvalidated(ctx context.Context, jti string) (bool, error) {
+	key := "token:blacklist:" + jti
+	count, err := p.client.Exists(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

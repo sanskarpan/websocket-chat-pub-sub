@@ -4,22 +4,25 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 	"time"
 
 	"github.com/websocket-chat/internal/config"
 	"github.com/websocket-chat/internal/model"
 	"github.com/websocket-chat/internal/pubsub"
 	"github.com/websocket-chat/internal/repository"
+	"github.com/websocket-chat/pkg/sanitization"
+	"github.com/websocket-chat/pkg/validator"
 )
 
 type MessageService struct {
-	messageRepo *repository.MessageRepository
-	roomRepo    *repository.RoomRepository
+	messageRepo repository.IMessageRepository
+	roomRepo    repository.IRoomRepository
 	pubsub      pubsub.PubSub
 	cfg         *config.Config
 }
 
-func NewMessageService(messageRepo *repository.MessageRepository, roomRepo *repository.RoomRepository, ps pubsub.PubSub, cfg *config.Config) *MessageService {
+func NewMessageService(messageRepo repository.IMessageRepository, roomRepo repository.IRoomRepository, ps pubsub.PubSub, cfg *config.Config) *MessageService {
 	return &MessageService{
 		messageRepo: messageRepo,
 		roomRepo:    roomRepo,
@@ -38,10 +41,19 @@ type SendMessageInput struct {
 }
 
 func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput) (*model.Message, error) {
+	content := sanitization.SanitizeMessage(input.Content)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, errors.New("content cannot be empty")
+	}
+	if err := validator.ValidateMessageContent(content); err != nil {
+		return nil, err
+	}
+
 	msg := &model.Message{
 		RoomID:      input.RoomID,
 		UserID:      input.UserID,
-		Content:     input.Content,
+		Content:     content,
 		ContentType: input.ContentType,
 		ParentID:    input.ParentID,
 	}
@@ -70,13 +82,31 @@ func (s *MessageService) GetRoomMessages(ctx context.Context, roomID string, lim
 }
 
 func (s *MessageService) EditMessage(ctx context.Context, msgID, requesterID, content string) error {
+	content = sanitization.SanitizeMessage(content)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return errors.New("content cannot be empty")
+	}
+	if err := validator.ValidateMessageContent(content); err != nil {
+		return err
+	}
+
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
 	}
 
+	if msg.DeletedAt != nil {
+		return errors.New("cannot edit deleted message")
+	}
+
 	if msg.UserID != requesterID {
 		return errors.New("unauthorized: only message author can edit this message")
+	}
+
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
 	msg.Content = content
@@ -102,25 +132,23 @@ func (s *MessageService) DeleteMessage(ctx context.Context, msgID, requesterID s
 		return err
 	}
 
+	if msg.DeletedAt != nil {
+		return errors.New("message already deleted")
+	}
+
 	if msg.UserID != requesterID {
-		isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
-		if err != nil || !isMember {
+		member, err := s.roomRepo.GetMember(ctx, msg.RoomID, requesterID)
+		if err != nil || member == nil {
 			return errors.New("unauthorized: permission denied to delete this message")
 		}
-		members, err := s.roomRepo.GetMembers(ctx, msg.RoomID)
-		if err != nil {
-			return errors.New("unauthorized: permission denied")
-		}
-		authorized := false
-		for _, m := range members {
-			if m.UserID == requesterID && (m.Role == model.RoleOwner || m.Role == model.RoleAdmin || m.Role == model.RoleModerator) {
-				authorized = true
-				break
-			}
-		}
-		if !authorized {
+		if member.Role != model.RoleOwner && member.Role != model.RoleAdmin && member.Role != model.RoleModerator {
 			return errors.New("unauthorized: only author or room moderator/admin can delete this message")
 		}
+	}
+
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
 	if err := s.messageRepo.Delete(ctx, msgID, requesterID); err != nil {
@@ -149,12 +177,22 @@ func (s *MessageService) AddReaction(ctx context.Context, msgID, emoji, userID s
 		return err
 	}
 
+	if msg.DeletedAt != nil {
+		return errors.New("cannot react to deleted message")
+	}
+
 	if msg.Reactions == nil {
 		msg.Reactions = make(map[string][]string)
 	}
 
+	for _, u := range msg.Reactions[emoji] {
+		if u == userID {
+			return nil
+		}
+	}
+
 	msg.Reactions[emoji] = append(msg.Reactions[emoji], userID)
-	if err := s.messageRepo.Update(ctx, msg); err != nil {
+	if err := s.messageRepo.UpdateReactionsTx(ctx, msg.ID, msg.Reactions); err != nil {
 		return err
 	}
 
@@ -178,15 +216,24 @@ func (s *MessageService) RemoveReaction(ctx context.Context, msgID, emoji, userI
 		return err
 	}
 
+	if msg.DeletedAt != nil {
+		return errors.New("cannot remove reaction from deleted message")
+	}
+
 	if msg.Reactions != nil {
 		users := msg.Reactions[emoji]
+		found := false
 		for i, u := range users {
 			if u == userID {
 				msg.Reactions[emoji] = append(users[:i], users[i+1:]...)
+				found = true
 				break
 			}
 		}
-		if err := s.messageRepo.Update(ctx, msg); err != nil {
+		if !found {
+			return nil
+		}
+		if err := s.messageRepo.UpdateReactionsTx(ctx, msg.ID, msg.Reactions); err != nil {
 			return err
 		}
 

@@ -106,23 +106,59 @@ func (r *MessageRepository) GetByRoom(ctx context.Context, roomID string, limit 
 		json.Unmarshal(metadata, &msg.Metadata)
 		messages = append(messages, &msg)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return messages, nil
 }
 
 func (r *MessageRepository) Update(ctx context.Context, msg *model.Message) error {
-	msg.EditedAt = new(time.Time)
-	*msg.EditedAt = time.Now()
-
 	query := `
 		UPDATE messages SET content = $2, edited_at = $3, reactions = $4, attachments = $5, metadata = $6
 		WHERE id = $1
 	`
+	now := time.Now()
+	msg.EditedAt = &now
 	reactions, _ := json.Marshal(msg.Reactions)
 	attachments, _ := json.Marshal(msg.Attachments)
 	metadata, _ := json.Marshal(msg.Metadata)
 
 	_, err := r.db.Exec(ctx, query, msg.ID, msg.Content, msg.EditedAt, reactions, attachments, metadata)
 	return err
+}
+
+func (r *MessageRepository) UpdateReactions(ctx context.Context, msgID string, reactions map[string][]string) error {
+	reactionsJSON, err := json.Marshal(reactions)
+	if err != nil {
+		return err
+	}
+	query := `UPDATE messages SET reactions = $2 WHERE id = $1`
+	_, err = r.db.Exec(ctx, query, msgID, reactionsJSON)
+	return err
+}
+
+func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, reactions map[string][]string) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var existing []byte
+	row := tx.QueryRow(ctx, `SELECT reactions FROM messages WHERE id = $1 FOR UPDATE`, msgID)
+	if err := row.Scan(&existing); err != nil {
+		return err
+	}
+
+	reactionsJSON, err := json.Marshal(reactions)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE messages SET reactions = $2 WHERE id = $1`, msgID, reactionsJSON); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
 }
 
 func (r *MessageRepository) Delete(ctx context.Context, id, deletedBy string) error {
@@ -160,6 +196,9 @@ func (r *MessageRepository) GetThread(ctx context.Context, parentID string, limi
 		json.Unmarshal(attachments, &msg.Attachments)
 		json.Unmarshal(metadata, &msg.Metadata)
 		messages = append(messages, &msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return messages, nil
 }

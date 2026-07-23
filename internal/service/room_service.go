@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/websocket-chat/internal/cache"
@@ -11,12 +12,12 @@ import (
 )
 
 type RoomService struct {
-	roomRepo   *repository.RoomRepository
-	userRepo   *repository.UserRepository
+	roomRepo   repository.IRoomRepository
+	userRepo   repository.IUserRepository
 	redisCache cache.Cache
 }
 
-func NewRoomService(roomRepo *repository.RoomRepository, userRepo *repository.UserRepository, redisCache cache.Cache) *RoomService {
+func NewRoomService(roomRepo repository.IRoomRepository, userRepo repository.IUserRepository, redisCache cache.Cache) *RoomService {
 	return &RoomService{
 		roomRepo:   roomRepo,
 		userRepo:   userRepo,
@@ -153,13 +154,22 @@ func (s *RoomService) IsMember(ctx context.Context, roomID, userID string) (bool
 }
 
 func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pubsub.PubSub) error {
-	isMember, err := s.roomRepo.IsMember(ctx, roomID, userID)
-	if err != nil {
-		return err
+	if _, err := s.roomRepo.GetByID(ctx, roomID); err != nil {
+		return errors.New("room not found")
 	}
 
-	if !isMember {
-		member := &model.RoomMember{
+	member, err := s.roomRepo.GetMember(ctx, roomID, userID)
+	if err == nil && member != nil {
+		if member.BannedAt != nil {
+			return errors.New("user is banned from this room")
+		}
+		if member.LeftAt == nil {
+			return nil
+		}
+	}
+
+	if member == nil {
+		newMember := &model.RoomMember{
 			RoomID:     roomID,
 			UserID:     userID,
 			Role:       model.RoleMember,
@@ -171,8 +181,11 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pu
 				Sound:        true,
 			},
 		}
-		if err := s.roomRepo.AddMember(ctx, member); err != nil {
+		if err := s.roomRepo.JoinRoomTx(ctx, newMember); err != nil {
 			return err
+		}
+		if s.redisCache != nil {
+			s.redisCache.Del(ctx, "room:"+roomID)
 		}
 	}
 
@@ -184,9 +197,23 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pu
 }
 
 func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string, ps pubsub.PubSub) error {
-	err := s.roomRepo.RemoveMember(ctx, roomID, userID)
-	if err != nil {
+	member, err := s.roomRepo.GetMember(ctx, roomID, userID)
+	if err != nil || member == nil {
+		return errors.New("not a member of this room")
+	}
+
+	if member.Role == model.RoleOwner {
+		count, err := s.roomRepo.GetMembers(ctx, roomID)
+		if err == nil && len(count) == 1 {
+			return errors.New("cannot leave room as the only owner; transfer ownership or delete the room")
+		}
+	}
+
+	if err := s.roomRepo.LeaveRoomTx(ctx, roomID, userID); err != nil {
 		return err
+	}
+	if s.redisCache != nil {
+		s.redisCache.Del(ctx, "room:"+roomID)
 	}
 
 	if ps != nil {
@@ -194,4 +221,15 @@ func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string, ps p
 	}
 
 	return nil
+}
+
+func (s *RoomService) MarkRead(ctx context.Context, roomID, userID, messageID string) error {
+	isMember, err := s.roomRepo.IsMember(ctx, roomID, userID)
+	if err != nil {
+		return err
+	}
+	if !isMember {
+		return errors.New("not a member of this room")
+	}
+	return s.roomRepo.MarkRead(ctx, roomID, userID, messageID)
 }

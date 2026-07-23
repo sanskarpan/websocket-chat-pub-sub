@@ -10,11 +10,11 @@ import (
 )
 
 type UserService struct {
-	userRepo   *repository.UserRepository
+	userRepo   repository.IUserRepository
 	redisCache cache.Cache
 }
 
-func NewUserService(userRepo *repository.UserRepository, redisCache cache.Cache) *UserService {
+func NewUserService(userRepo repository.IUserRepository, redisCache cache.Cache) *UserService {
 	return &UserService{
 		userRepo:   userRepo,
 		redisCache: redisCache,

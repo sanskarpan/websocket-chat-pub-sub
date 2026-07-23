@@ -71,6 +71,7 @@ type PostgresqlConfig struct {
 	SSLMode         string        `mapstructure:"ssl_mode"`
 	MaxOpenConns    int           `mapstructure:"max_open_conns"`
 	MaxIdleConns    int           `mapstructure:"max_idle_conns"`
+	MinIdleConns    int           `mapstructure:"min_idle_conns"`
 	ConnMaxLifetime time.Duration `mapstructure:"conn_max_lifetime"`
 }
 
@@ -254,6 +255,7 @@ func defaultConfig() *Config {
 				SSLMode:         "disable",
 				MaxOpenConns:    25,
 				MaxIdleConns:    10,
+				MinIdleConns:    2,
 				ConnMaxLifetime: 30 * time.Minute,
 			},
 		},

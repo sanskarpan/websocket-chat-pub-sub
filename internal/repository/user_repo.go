@@ -9,6 +9,15 @@ import (
 	"github.com/websocket-chat/internal/model"
 )
 
+type UserRepositoryInterface interface {
+	Create(ctx context.Context, user *model.User) error
+	GetByID(ctx context.Context, id string) (*model.User, error)
+	GetByUsername(ctx context.Context, username string) (*model.User, error)
+	GetByEmail(ctx context.Context, email string) (*model.User, error)
+	Update(ctx context.Context, user *model.User) error
+	Search(ctx context.Context, query string, limit int) ([]*model.User, error)
+}
+
 type UserRepository struct {
 	db *pgxpool.Pool
 }
@@ -119,6 +128,9 @@ func (r *UserRepository) Search(ctx context.Context, query string, limit int) ([
 			return nil, err
 		}
 		users = append(users, &user)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return users, nil
 }
