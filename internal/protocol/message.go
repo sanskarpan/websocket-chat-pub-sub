@@ -3,6 +3,8 @@ package protocol
 import (
 	"encoding/json"
 	"time"
+
+	"github.com/websocket-chat/pkg/snowflake"
 )
 
 type ClientMessageType string
@@ -148,5 +150,5 @@ func (m *ServerMessage) ToJSON() ([]byte, error) {
 }
 
 func generateID() string {
-	return time.Now().Format("20060102150405.000000")
+	return snowflake.Generate().String()
 }

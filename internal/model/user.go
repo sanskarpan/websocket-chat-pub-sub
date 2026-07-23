@@ -82,7 +82,7 @@ type RoomMember struct {
 	LastReadAt    time.Time            `json:"last_read_at" db:"last_read_at"`
 	MutedUntil    *time.Time           `json:"muted_until,omitempty" db:"muted_until"`
 	BannedAt      *time.Time           `json:"banned_at,omitempty" db:"banned_at"`
-	BanReason     string               `json:"ban_reason,omitempty" db:"ban_reason"`
+	BanReason     *string              `json:"ban_reason,omitempty" db:"ban_reason"`
 	Notifications NotificationSettings `json:"notifications" db:"notifications"`
 }
 

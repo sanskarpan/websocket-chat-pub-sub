@@ -2,11 +2,14 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/uuid"
@@ -36,6 +39,9 @@ type Server struct {
 	ctx        context.Context
 	cancel     context.CancelFunc
 	wg         sync.WaitGroup
+
+	ipConnections sync.Map
+	clientWG      sync.WaitGroup
 }
 
 func NewServer(
@@ -82,6 +88,9 @@ func (s *Server) Start() error {
 		WriteTimeout: s.cfg.Server.HTTP.WriteTimeout,
 		IdleTimeout:  s.cfg.Server.HTTP.IdleTimeout,
 	}
+	if s.cfg.Server.TLS.Enabled {
+		httpServer.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 
 	s.httpServer = httpServer
 
@@ -93,6 +102,9 @@ func (s *Server) Start() error {
 		go s.subscribeToPresence()
 	}
 
+	if s.cfg.Server.TLS.Enabled && s.cfg.Server.TLS.CertFile != "" && s.cfg.Server.TLS.KeyFile != "" {
+		return httpServer.ListenAndServeTLS(s.cfg.Server.TLS.CertFile, s.cfg.Server.TLS.KeyFile)
+	}
 	return httpServer.ListenAndServe()
 }
 
@@ -184,9 +196,13 @@ func (s *Server) subscribeToRoomMessages() {
 
 				if serverMsg != nil {
 					data, _ := serverMsg.ToJSON()
-					s.hub.broadcast <- &BroadcastMessage{
+					select {
+					case s.hub.broadcast <- &BroadcastMessage{
 						RoomID: roomID,
 						Data:   data,
+					}:
+					default:
+						s.logger.Warn().Str("room_id", roomID).Msg("broadcast channel full, dropping message")
 					}
 				}
 			}
@@ -251,33 +267,52 @@ func (s *Server) subscribeToPresence() {
 					break presenceLoop
 				}
 
-				var data struct {
-					UserID   string          `json:"user_id"`
-					Presence *model.Presence `json:"presence"`
-				}
-				if err := json.Unmarshal([]byte(msg.Payload), &data); err != nil {
-					continue
-				}
+var data struct {
+				UserID   string          `json:"user_id"`
+				Presence *model.Presence `json:"presence"`
+			}
+			if err := json.Unmarshal([]byte(msg.Payload), &data); err != nil {
+				continue
+			}
 
-				presenceMsg, _ := protocol.NewServerMessage(protocol.ServerMsgPresence, map[string]interface{}{
-					"user_id":  data.UserID,
-					"status":   data.Presence.Status,
-					"presence": data.Presence,
-				})
-				presenceBytes, _ := presenceMsg.ToJSON()
+			if data.Presence == nil {
+				continue
+			}
 
-				s.hub.mu.RLock()
-				for _, client := range s.hub.clients {
-					select {
-					case client.send <- presenceBytes:
-					default:
-					}
+			presenceMsg, err := protocol.NewServerMessage(protocol.ServerMsgPresence, map[string]interface{}{
+				"user_id":  data.UserID,
+				"status":   data.Presence.Status,
+				"presence": data.Presence,
+			})
+			if err != nil {
+				s.logger.Error().Err(err).Msg("Failed to create presence message")
+				continue
+			}
+			presenceBytes, err := presenceMsg.ToJSON()
+			if err != nil {
+				s.logger.Error().Err(err).Msg("Failed to marshal presence message")
+				continue
+			}
+
+			s.hub.mu.RLock()
+			clients := make([]*Client, 0, len(s.hub.clients))
+			for _, client := range s.hub.clients {
+				if !client.isClosed() {
+					clients = append(clients, client)
 				}
-				s.hub.mu.RUnlock()
+			}
+			s.hub.mu.RUnlock()
+
+			for _, client := range clients {
+				select {
+				case client.send <- presenceBytes:
+				default:
+				}
 			}
 		}
-		sub.Close()
 	}
+	sub.Close()
+}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -294,9 +329,22 @@ func (s *Server) Shutdown(ctx context.Context) error {
 	select {
 	case <-done:
 	case <-time.After(5 * time.Second):
+		s.logger.Warn().Msg("Timeout waiting for pub/sub goroutines to finish")
 	}
 
 	s.hub.CloseAll()
+
+	clientDone := make(chan struct{})
+	go func() {
+		s.clientWG.Wait()
+		close(clientDone)
+	}()
+
+	select {
+	case <-clientDone:
+	case <-time.After(10 * time.Second):
+		s.logger.Warn().Msg("Timeout waiting for client goroutines to finish")
+	}
 
 	if s.httpServer != nil {
 		return s.httpServer.Shutdown(ctx)
@@ -306,11 +354,35 @@ func (s *Server) Shutdown(ctx context.Context) error {
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "application/json")
-	json.NewEncoder(w).Encode(map[string]string{"status": "ok"})
+	if err := json.NewEncoder(w).Encode(map[string]string{"status": "ok"}); err != nil {
+		s.logger.Error().Err(err).Msg("Failed to encode health response")
+	}
 }
 
 func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
+
+	var ipCounter *atomic.Int32
+	if s.cfg.Server.Websocket.MaxConnectionsPerIP > 0 {
+		ip := s.getClientIP(r)
+		count, _ := s.ipConnections.LoadOrStore(ip, &atomic.Int32{})
+		counter := count.(*atomic.Int32)
+		if counter.Add(1) > int32(s.cfg.Server.Websocket.MaxConnectionsPerIP) {
+			counter.Add(-1)
+			http.Error(w, "Too many connections from this IP", http.StatusTooManyRequests)
+			return
+		}
+		ipCounter = counter
+	}
+
+	defer func() {
+		if r := recover(); r != nil {
+			s.logger.Error().Interface("panic", r).Msg("panic in handleWebSocket")
+			if ipCounter != nil {
+				ipCounter.Add(-1)
+			}
+		}
+	}()
 
 	token := r.URL.Query().Get("token")
 	if token == "" {
@@ -318,14 +390,35 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if token == "" {
+		if ipCounter != nil {
+			ipCounter.Add(-1)
+		}
 		http.Error(w, "Unauthorized", http.StatusUnauthorized)
 		return
 	}
 
 	user, err := s.authService.ValidateToken(ctx, token)
 	if err != nil {
+		if ipCounter != nil {
+			ipCounter.Add(-1)
+		}
 		http.Error(w, "Invalid token", http.StatusUnauthorized)
 		return
+	}
+
+	if s.pubsub != nil {
+		for _, rule := range s.cfg.RateLimit.Rules {
+			if rule.Key == "connection" && rule.Limit > 0 {
+				allowed, err := s.pubsub.CheckRateLimit(ctx, "connection:"+user.ID, rule.Limit, rule.Window)
+				if err == nil && !allowed {
+					if ipCounter != nil {
+						ipCounter.Add(-1)
+					}
+					http.Error(w, "Too many connections", http.StatusTooManyRequests)
+					return
+				}
+			}
+		}
 	}
 
 	allowedOrigins := s.getAllowedOrigins()
@@ -350,24 +443,43 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	conn, err := upgrader.Upgrade(w, r, nil)
 	if err != nil {
 		s.logger.Error().Err(err).Msg("Failed to upgrade connection")
+		if ipCounter != nil {
+			ipCounter.Add(-1)
+		}
 		return
 	}
 
 	client := NewClient(s.hub, conn, user.ID, s.logger, s.roomService, s.messageService, s.presenceService, s.cfg)
+	client.ipCounter = ipCounter
 	s.hub.register <- client
 
-	go client.ReadPump()
-	go client.WritePump()
+	s.clientWG.Add(2)
+	go func() {
+		defer s.clientWG.Done()
+		client.ReadPump()
+	}()
+	go func() {
+		defer s.clientWG.Done()
+		client.WritePump()
+	}()
 }
 
 func (s *Server) getAllowedOrigins() []string {
 	return []string{"http://localhost:3000", "http://localhost:8085", "http://127.0.0.1:3000", "http://127.0.0.1:8085"}
 }
 
+func (s *Server) getClientIP(r *http.Request) string {
+	host, _, err := net.SplitHostPort(r.RemoteAddr)
+	if err != nil {
+		return r.RemoteAddr
+	}
+	return host
+}
+
 type Hub struct {
-	clients map[string]*Client
-	users   map[string]map[string]bool
-	rooms   map[string]map[string]bool
+	clients    map[string]*Client
+	users      map[string]map[string]bool
+	rooms      map[string]map[string]bool
 
 	register   chan *Client
 	unregister chan *Client
@@ -376,6 +488,8 @@ type Hub struct {
 	pubsub pubsub.PubSub
 	logger *zerolog.Logger
 	mu     sync.RWMutex
+	closed bool
+	quit   chan struct{}
 }
 
 func NewHub(ps pubsub.PubSub, logger *zerolog.Logger) *Hub {
@@ -388,12 +502,21 @@ func NewHub(ps pubsub.PubSub, logger *zerolog.Logger) *Hub {
 		broadcast:  make(chan *BroadcastMessage, 100),
 		pubsub:     ps,
 		logger:     logger,
+		quit:       make(chan struct{}),
 	}
 }
 
 func (h *Hub) Run() {
+	defer func() {
+		for client := range h.unregister {
+			h.cleanupClient(client)
+		}
+	}()
+
 	for {
 		select {
+		case <-h.quit:
+			return
 		case client := <-h.register:
 			h.mu.Lock()
 			h.clients[client.id] = client
@@ -408,33 +531,48 @@ func (h *Hub) Run() {
 			h.logger.Info().Str("user_id", client.userID).Str("conn_id", client.id).Msg("Client connected")
 
 		case client := <-h.unregister:
-			h.mu.Lock()
-			if _, ok := h.clients[client.id]; ok {
-				delete(h.clients, client.id)
-				delete(h.users[client.userID], client.id)
-				if len(h.users[client.userID]) == 0 {
-					delete(h.users, client.userID)
-				}
-
-				for roomID := range client.rooms {
-					if h.rooms[roomID] != nil {
-						delete(h.rooms[roomID], client.id)
-						if len(h.rooms[roomID]) == 0 {
-							delete(h.rooms, roomID)
-						}
-					}
-				}
-			}
-			h.mu.Unlock()
-
-			metrics.WebsocketConnectionsActive.Dec()
-
-			h.logger.Info().Str("user_id", client.userID).Str("conn_id", client.id).Msg("Client disconnected")
+			h.cleanupClient(client)
 
 		case msg := <-h.broadcast:
 			h.broadcastMessage(msg)
 		}
 	}
+}
+
+func (h *Hub) cleanupClient(client *Client) {
+	h.mu.Lock()
+	subsRemoved := 0
+	alreadyClosed := client.closed.Load()
+	if _, ok := h.clients[client.id]; ok {
+		delete(h.clients, client.id)
+		delete(h.users[client.userID], client.id)
+		if len(h.users[client.userID]) == 0 {
+			delete(h.users, client.userID)
+		}
+
+		for roomID := range client.rooms {
+			if h.rooms[roomID] != nil {
+				delete(h.rooms[roomID], client.id)
+				if len(h.rooms[roomID]) == 0 {
+					delete(h.rooms, roomID)
+				}
+				subsRemoved++
+			}
+		}
+		if !alreadyClosed {
+			client.closed.Store(true)
+		}
+	}
+	h.mu.Unlock()
+
+	if !alreadyClosed {
+		metrics.WebsocketConnectionsActive.Dec()
+		for i := 0; i < subsRemoved; i++ {
+			metrics.RoomSubscriptionsActive.Dec()
+		}
+	}
+
+	h.logger.Info().Str("user_id", client.userID).Str("conn_id", client.id).Msg("Client disconnected")
 }
 
 func (h *Hub) broadcastMessage(msg *BroadcastMessage) {
@@ -454,27 +592,44 @@ func (h *Hub) broadcastMessage(msg *BroadcastMessage) {
 			continue
 		}
 
+		if client.isClosed() {
+			continue
+		}
+
 		select {
 		case client.send <- msg.Data:
 		default:
 			h.mu.Lock()
 			if c, exists := h.clients[connID]; exists && c == client {
+				if !client.closed.Swap(true) {
+					if client.cancel != nil {
+						client.cancel()
+					}
+				}
 				delete(h.clients, connID)
 				delete(h.users[client.userID], connID)
 				if len(h.users[client.userID]) == 0 {
 					delete(h.users, client.userID)
 				}
+				subsRemoved := 0
 				for roomID := range client.rooms {
 					if h.rooms[roomID] != nil {
 						delete(h.rooms[roomID], connID)
 						if len(h.rooms[roomID]) == 0 {
 							delete(h.rooms, roomID)
 						}
+						subsRemoved++
 					}
 				}
-				close(client.send)
+				h.mu.Unlock()
+
+				metrics.WebsocketConnectionsActive.Dec()
+				for i := 0; i < subsRemoved; i++ {
+					metrics.RoomSubscriptionsActive.Dec()
+				}
+			} else {
+				h.mu.Unlock()
 			}
-			h.mu.Unlock()
 		}
 	}
 }
@@ -483,13 +638,18 @@ func (h *Hub) SubscribeToRoom(client *Client, roomID string) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if client.isClosed() {
+		return
+	}
+
 	if h.rooms[roomID] == nil {
 		h.rooms[roomID] = make(map[string]bool)
 	}
-	h.rooms[roomID][client.id] = true
+	if !h.rooms[roomID][client.id] {
+		h.rooms[roomID][client.id] = true
+		metrics.RoomSubscriptionsActive.Inc()
+	}
 	client.rooms[roomID] = true
-
-	metrics.RoomSubscriptionsActive.Inc()
 }
 
 func (h *Hub) UnsubscribeFromRoom(client *Client, roomID string) {
@@ -497,25 +657,32 @@ func (h *Hub) UnsubscribeFromRoom(client *Client, roomID string) {
 	defer h.mu.Unlock()
 
 	if h.rooms[roomID] != nil {
-		delete(h.rooms[roomID], client.id)
+		if h.rooms[roomID][client.id] {
+			delete(h.rooms[roomID], client.id)
+			metrics.RoomSubscriptionsActive.Dec()
+		}
 		if len(h.rooms[roomID]) == 0 {
 			delete(h.rooms, roomID)
 		}
 	}
 	delete(client.rooms, roomID)
-
-	metrics.RoomSubscriptionsActive.Dec()
 }
 
 func (h *Hub) CloseAll() {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	if h.closed {
+		return
+	}
+	h.closed = true
+	close(h.quit)
+
 	for _, client := range h.clients {
-		select {
-		case <-client.send:
-		default:
-			close(client.send)
+		if !client.closed.Swap(true) {
+			if client.cancel != nil {
+				client.cancel()
+			}
 		}
 	}
 }
@@ -537,9 +704,15 @@ type Client struct {
 	messageService  *service.MessageService
 	presenceService *service.PresenceService
 	cfg             *config.Config
+	closed          atomic.Bool
+	closedInProgress atomic.Bool
+	ctx             context.Context
+	cancel          context.CancelFunc
+	ipCounter       *atomic.Int32
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, userID string, logger *zerolog.Logger, roomService *service.RoomService, messageService *service.MessageService, presenceService *service.PresenceService, cfg *config.Config) *Client {
+	ctx, cancel := context.WithCancel(context.Background())
 	return &Client{
 		hub:             hub,
 		conn:            conn,
@@ -552,13 +725,22 @@ func NewClient(hub *Hub, conn *websocket.Conn, userID string, logger *zerolog.Lo
 		messageService:  messageService,
 		presenceService: presenceService,
 		cfg:             cfg,
+		ctx:             ctx,
+		cancel:          cancel,
 	}
 }
 
 func (c *Client) ReadPump() {
 	defer func() {
-		c.hub.unregister <- c
+		c.cancel()
+		select {
+		case c.hub.unregister <- c:
+		default:
+		}
 		c.conn.Close()
+		if c.ipCounter != nil {
+			c.ipCounter.Add(-1)
+		}
 	}()
 
 	c.conn.SetReadLimit(c.cfg.Server.Websocket.MaxMessageSize)
@@ -573,11 +755,13 @@ func (c *Client) ReadPump() {
 		if err != nil {
 			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
 				c.logger.Error().Err(err).Msg("WebSocket error")
+				metrics.ConnectionErrorsTotal.WithLabelValues("read_error").Inc()
 			}
 			break
 		}
 
 		c.handleMessage(message)
+		metrics.MessagesReceivedTotal.WithLabelValues("chat").Inc()
 	}
 }
 
@@ -590,13 +774,15 @@ func (c *Client) WritePump() {
 
 	for {
 		select {
+		case <-c.ctx.Done():
+			c.drainAndClose()
+			return
 		case message, ok := <-c.send:
-			c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Server.Websocket.WriteTimeout))
 			if !ok {
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
 				return
 			}
 
+			c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Server.Websocket.WriteTimeout))
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				return
@@ -616,6 +802,26 @@ func (c *Client) WritePump() {
 	}
 }
 
+func (c *Client) isSubscribed(roomID string) bool {
+	c.hub.mu.RLock()
+	defer c.hub.mu.RUnlock()
+	if subs, ok := c.hub.rooms[roomID]; ok {
+		return subs[c.id]
+	}
+	return false
+}
+
+func (c *Client) drainAndClose() {
+	if c.closedInProgress.Swap(true) {
+		return
+	}
+	close(c.send)
+}
+
+func (c *Client) isClosed() bool {
+	return c.closed.Load() || c.closedInProgress.Load()
+}
+
 func (c *Client) handleMessage(data []byte) {
 	var msg protocol.ClientMessage
 	if err := json.Unmarshal(data, &msg); err != nil {
@@ -623,7 +829,7 @@ func (c *Client) handleMessage(data []byte) {
 		return
 	}
 
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	ctx, cancel := context.WithTimeout(c.ctx, 10*time.Second)
 	defer cancel()
 
 	switch msg.Type {
@@ -634,11 +840,22 @@ func (c *Client) handleMessage(data []byte) {
 	case protocol.ClientMsgMessage:
 		c.handleChatMessage(ctx, msg)
 	case protocol.ClientMsgTyping:
-		c.handleTyping(msg)
+		c.handleTyping(ctx, msg)
 	case protocol.ClientMsgPing:
 		c.handlePing(msg)
 	case protocol.ClientMsgPresence:
 		c.handlePresence(ctx, msg)
+	case protocol.ClientMsgReaction:
+		c.handleReaction(ctx, msg)
+	case protocol.ClientMsgEdit:
+		c.handleEdit(ctx, msg)
+	case protocol.ClientMsgDelete:
+		c.handleDelete(ctx, msg)
+	case protocol.ClientMsgReadReceipt:
+		c.handleReadReceipt(ctx, msg)
+	default:
+		c.logger.Warn().Str("type", string(msg.Type)).Msg("unknown message type")
+		c.sendError(msg.ID, "UNKNOWN_TYPE", "unknown message type: "+string(msg.Type))
 	}
 }
 
@@ -648,19 +865,33 @@ func (c *Client) handleSubscribe(ctx context.Context, msg protocol.ClientMessage
 		return
 	}
 
+	subscribed := 0
 	for _, roomID := range data.RoomIDs {
 		isMember, _ := c.roomService.IsMember(ctx, roomID, c.userID)
 		if isMember {
 			c.hub.SubscribeToRoom(c, roomID)
+			subscribed++
 		}
 	}
 
-	ack, _ := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
+	status := "subscribed"
+	if subscribed == 0 && len(data.RoomIDs) > 0 {
+		status = "not_subscribed"
+	}
+
+	ack, err := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
 		ClientMsgID: msg.ID,
-		Status:      "subscribed",
+		Status:      status,
 	})
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to create ack message")
+		return
+	}
 	ackBytes, _ := ack.ToJSON()
-	c.send <- ackBytes
+	select {
+	case c.send <- ackBytes:
+	default:
+	}
 }
 
 func (c *Client) handleUnsubscribe(msg protocol.ClientMessage) {
@@ -680,6 +911,32 @@ func (c *Client) handleChatMessage(ctx context.Context, msg protocol.ClientMessa
 		return
 	}
 
+	if data.RoomID == "" {
+		c.sendError(msg.ID, "INVALID_INPUT", "room_id is required")
+		return
+	}
+
+	if data.Content == "" {
+		c.sendError(msg.ID, "INVALID_INPUT", "content cannot be empty")
+		return
+	}
+
+	if len(data.Content) > 4000 {
+		c.sendError(msg.ID, "CONTENT_TOO_LONG", "content exceeds 4000 characters")
+		return
+	}
+
+	isMember, err := c.roomService.IsMember(ctx, data.RoomID, c.userID)
+	if err != nil || !isMember {
+		c.sendError(msg.ID, "FORBIDDEN", "not a member of this room")
+		return
+	}
+
+	if !c.isSubscribed(data.RoomID) {
+		c.sendError(msg.ID, "NOT_SUBSCRIBED", "must subscribe to room before sending messages")
+		return
+	}
+
 	savedMsg, err := c.messageService.SendMessage(ctx, service.SendMessageInput{
 		RoomID:      data.RoomID,
 		UserID:      c.userID,
@@ -690,47 +947,91 @@ func (c *Client) handleChatMessage(ctx context.Context, msg protocol.ClientMessa
 	})
 
 	if err != nil {
-		errorMsg, _ := protocol.NewServerMessage(protocol.ServerMsgError, protocol.ErrorData{
-			ClientMsgID: msg.ID,
-			Code:        "SEND_FAILED",
-			Message:     err.Error(),
-		})
-		errorBytes, _ := errorMsg.ToJSON()
-		c.send <- errorBytes
+		c.sendError(msg.ID, "SEND_FAILED", err.Error())
 		return
 	}
 
-	ack, _ := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
+	ack, err := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
 		ClientMsgID: msg.ID,
 		ServerMsgID: savedMsg.ID,
 		Status:      "delivered",
 	})
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to create ack")
+		return
+	}
 	ackBytes, _ := ack.ToJSON()
-	c.send <- ackBytes
+	select {
+	case c.send <- ackBytes:
+	default:
+	}
 
 	metrics.MessagesSentTotal.WithLabelValues("chat").Inc()
 }
 
-func (c *Client) handleTyping(msg protocol.ClientMessage) {
+func (c *Client) sendError(clientMsgID, code, message string) {
+	errorMsg, err := protocol.NewServerMessage(protocol.ServerMsgError, protocol.ErrorData{
+		ClientMsgID: clientMsgID,
+		Code:        code,
+		Message:     message,
+	})
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to create error message")
+		return
+	}
+	errorBytes, _ := errorMsg.ToJSON()
+	select {
+	case c.send <- errorBytes:
+	default:
+	}
+}
+
+func (c *Client) handleTyping(ctx context.Context, msg protocol.ClientMessage) {
 	var data protocol.TypingData
 	if err := json.Unmarshal(msg.Data, &data); err != nil {
 		return
 	}
 
+	if data.RoomID == "" {
+		return
+	}
+
+	isMember, _ := c.roomService.IsMember(ctx, data.RoomID, c.userID)
+	if !isMember {
+		return
+	}
+
+	if !c.isSubscribed(data.RoomID) {
+		return
+	}
+
 	data.UserID = c.userID
-	typingMsg, _ := protocol.NewServerMessage(protocol.ServerMsgTyping, data)
+	typingMsg, err := protocol.NewServerMessage(protocol.ServerMsgTyping, data)
+	if err != nil {
+		c.logger.Error().Err(err).Msg("Failed to create typing message")
+		return
+	}
 	typingBytes, _ := typingMsg.ToJSON()
 
-	c.hub.broadcast <- &BroadcastMessage{
+	select {
+	case c.hub.broadcast <- &BroadcastMessage{
 		RoomID: data.RoomID,
 		Data:   typingBytes,
+	}:
+	default:
 	}
 }
 
 func (c *Client) handlePing(msg protocol.ClientMessage) {
-	pong, _ := protocol.NewServerMessage(protocol.ServerMsgPong, nil)
+	pong, err := protocol.NewServerMessage(protocol.ServerMsgPong, nil)
+	if err != nil {
+		return
+	}
 	pongBytes, _ := pong.ToJSON()
-	c.send <- pongBytes
+	select {
+	case c.send <- pongBytes:
+	default:
+	}
 }
 
 func (c *Client) handlePresence(ctx context.Context, msg protocol.ClientMessage) {
@@ -739,7 +1040,127 @@ func (c *Client) handlePresence(ctx context.Context, msg protocol.ClientMessage)
 		return
 	}
 
+	validStatuses := map[string]bool{
+		"online":  true,
+		"away":    true,
+		"dnd":     true,
+		"offline": true,
+	}
+	if !validStatuses[data.Status] {
+		c.sendError(msg.ID, "INVALID_INPUT", "invalid status value")
+		return
+	}
+
 	if c.presenceService != nil {
-		c.presenceService.SetPresence(ctx, c.userID, model.UserStatus(data.Status), model.ClientInfo{})
+		if err := c.presenceService.SetPresence(ctx, c.userID, model.UserStatus(data.Status), model.ClientInfo{}); err != nil {
+			c.logger.Error().Err(err).Msg("Failed to set presence")
+		}
+	}
+}
+
+func (c *Client) handleReaction(ctx context.Context, msg protocol.ClientMessage) {
+	var data protocol.ReactionData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		c.sendError(msg.ID, "INVALID_INPUT", "invalid reaction payload")
+		return
+	}
+
+	if data.MessageID == "" || data.Emoji == "" {
+		c.sendError(msg.ID, "INVALID_INPUT", "message_id and emoji required")
+		return
+	}
+
+	var err error
+	if data.Action == "remove" {
+		err = c.messageService.RemoveReaction(ctx, data.MessageID, data.Emoji, c.userID)
+	} else {
+		err = c.messageService.AddReaction(ctx, data.MessageID, data.Emoji, c.userID)
+	}
+	if err != nil {
+		c.sendError(msg.ID, "REACTION_FAILED", err.Error())
+		return
+	}
+
+	ack, _ := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
+		ClientMsgID: msg.ID,
+		Status:      "reaction_" + data.Action,
+	})
+	ackBytes, _ := ack.ToJSON()
+	select {
+	case c.send <- ackBytes:
+	default:
+	}
+}
+
+func (c *Client) handleEdit(ctx context.Context, msg protocol.ClientMessage) {
+	var data protocol.EditData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		c.sendError(msg.ID, "INVALID_INPUT", "invalid edit payload")
+		return
+	}
+
+	if data.MessageID == "" {
+		c.sendError(msg.ID, "INVALID_INPUT", "message_id required")
+		return
+	}
+
+	if err := c.messageService.EditMessage(ctx, data.MessageID, c.userID, data.Content); err != nil {
+		c.sendError(msg.ID, "EDIT_FAILED", err.Error())
+		return
+	}
+
+	ack, _ := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
+		ClientMsgID: msg.ID,
+		Status:      "edited",
+	})
+	ackBytes, _ := ack.ToJSON()
+	select {
+	case c.send <- ackBytes:
+	default:
+	}
+}
+
+func (c *Client) handleDelete(ctx context.Context, msg protocol.ClientMessage) {
+	var data protocol.DeleteData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		c.sendError(msg.ID, "INVALID_INPUT", "invalid delete payload")
+		return
+	}
+
+	if data.MessageID == "" {
+		c.sendError(msg.ID, "INVALID_INPUT", "message_id required")
+		return
+	}
+
+	if err := c.messageService.DeleteMessage(ctx, data.MessageID, c.userID); err != nil {
+		c.sendError(msg.ID, "DELETE_FAILED", err.Error())
+		return
+	}
+
+	ack, _ := protocol.NewServerMessage(protocol.ServerMsgAck, protocol.AckData{
+		ClientMsgID: msg.ID,
+		Status:      "deleted",
+	})
+	ackBytes, _ := ack.ToJSON()
+	select {
+	case c.send <- ackBytes:
+	default:
+	}
+}
+
+func (c *Client) handleReadReceipt(ctx context.Context, msg protocol.ClientMessage) {
+	var data protocol.ReadReceiptData
+	if err := json.Unmarshal(msg.Data, &data); err != nil {
+		return
+	}
+
+	if data.MessageID == "" || data.RoomID == "" {
+		return
+	}
+
+	if c.roomService != nil {
+		if err := c.roomService.MarkRead(ctx, data.RoomID, c.userID, data.MessageID); err != nil {
+			c.logger.Error().Err(err).Msg("Failed to mark message as read")
+		}
 	}
 }
