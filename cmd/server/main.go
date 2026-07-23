@@ -85,7 +85,7 @@ func main() {
 	authService := service.NewAuthService(cfg, userRepo)
 	authService.SetTokenInvalidator(ps)
 	userService := service.NewUserService(userRepo, redisCache)
-	roomService := service.NewRoomService(roomRepo, userRepo, redisCache)
+	roomService := service.NewRoomService(roomRepo, userRepo, redisCache, ps)
 	messageService := service.NewMessageService(messageRepo, roomRepo, ps, cfg)
 	presenceService := service.NewPresenceService(ps)
 
@@ -102,7 +102,7 @@ func main() {
 	router := gin.New()
 
 	allowedOrigins := []string{"http://localhost:3000", "http://localhost:8085", "http://127.0.0.1:3000", "http://127.0.0.1:8085"}
-	router.Use(gin.Recovery(), middleware.CORSMiddleware(allowedOrigins), middleware.RequestIDMiddleware())
+	router.Use(gin.Recovery(), middleware.CORSMiddleware(allowedOrigins), middleware.RequestIDMiddleware(), middleware.RequestLoggingMiddleware(cfg.App.Name))
 
 	healthChecker := health.NewChecker(db, ps)
 	h := handlers.New(cfg, authService, roomService, messageService, ps)
@@ -193,8 +193,12 @@ func setupRoutes(
 
 	api := router.Group("/api/v1")
 	{
+		authRateLimit := 10
+		if os.Getenv("AUTH_RATE_LIMIT_DISABLE") == "1" {
+			authRateLimit = 0
+		}
 		auth := api.Group("/auth")
-		auth.Use(middleware.RateLimitMiddleware(ps, "auth", 10, time.Minute))
+		auth.Use(middleware.RateLimitMiddleware(ps, "auth", authRateLimit, time.Minute))
 		{
 			auth.POST("/register", h.Register)
 			auth.POST("/login", h.Login)

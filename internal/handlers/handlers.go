@@ -210,6 +210,12 @@ func (h *Handlers) GetRoom(c *gin.Context) {
 		return
 	}
 
+	room, err := h.roomService.GetByID(c.Request.Context(), roomID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "Room not found"})
+		return
+	}
+
 	isMember, err := h.roomService.IsMember(c.Request.Context(), roomID, uid)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": "Failed to check membership"})
@@ -220,11 +226,6 @@ func (h *Handlers) GetRoom(c *gin.Context) {
 		return
 	}
 
-	room, err := h.roomService.GetByID(c.Request.Context(), roomID)
-	if err != nil {
-		c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "Room not found"})
-		return
-	}
 	c.JSON(http.StatusOK, room)
 }
 
@@ -274,7 +275,7 @@ func (h *Handlers) JoinRoom(c *gin.Context) {
 		return
 	}
 
-	if err := h.roomService.JoinRoom(c.Request.Context(), roomID, uid, h.ps); err != nil {
+	if err := h.roomService.JoinRoom(c.Request.Context(), roomID, uid); err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"code": "JOIN_FAILED", "message": "Failed to join room"})
 		return
 	}
@@ -288,8 +289,8 @@ func (h *Handlers) LeaveRoom(c *gin.Context) {
 		return
 	}
 
-	if err := h.roomService.LeaveRoom(c.Request.Context(), roomID, uid, h.ps); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": "LEAVE_FAILED", "message": "Failed to leave room"})
+	if err := h.roomService.LeaveRoom(c.Request.Context(), roomID, uid); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"code": "LEAVE_FAILED", "message": err.Error()})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "left"})
