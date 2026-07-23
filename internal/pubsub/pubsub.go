@@ -4,12 +4,16 @@ import (
 	"context"
 	"encoding/json"
 	"strconv"
-	"sync"
 	"time"
 
 	"github.com/redis/go-redis/v9"
+	"github.com/websocket-chat/internal/metrics"
 	"github.com/websocket-chat/internal/model"
 )
+
+func recordRedisDuration(operation string, start time.Time) {
+	metrics.RedisOperationDuration.WithLabelValues(operation).Observe(time.Since(start).Seconds())
+}
 
 type PubSub interface {
 	Publish(ctx context.Context, channel string, message []byte) error
@@ -22,6 +26,8 @@ type PubSub interface {
 	UnsubscribeFromRoom(ctx context.Context, roomID, userID string) error
 	GetRoomSubscribers(ctx context.Context, roomID string) ([]string, error)
 	CheckRateLimit(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
+	InvalidateToken(ctx context.Context, jti string, ttl time.Duration) error
+	IsTokenInvalidated(ctx context.Context, jti string) (bool, error)
 	Close() error
 }
 
@@ -37,7 +43,6 @@ type PatternSubscriber interface {
 
 type RedisPubSub struct {
 	client *redis.Client
-	mu     sync.RWMutex
 }
 
 type Config struct {
@@ -73,6 +78,7 @@ func NewRedisPubSub(client *redis.Client) *RedisPubSub {
 }
 
 func (p *RedisPubSub) Publish(ctx context.Context, channel string, message []byte) error {
+	defer recordRedisDuration("publish", time.Now())
 	return p.client.Publish(ctx, channel, message).Err()
 }
 
@@ -111,6 +117,7 @@ func (s *RedisPatternSubscriber) Close() error {
 }
 
 func (p *RedisPubSub) SetPresence(ctx context.Context, userID string, presence *model.Presence) error {
+	defer recordRedisDuration("set_presence", time.Now())
 	data, err := json.Marshal(presence)
 	if err != nil {
 		return err
@@ -129,6 +136,7 @@ func (p *RedisPubSub) SetPresence(ctx context.Context, userID string, presence *
 }
 
 func (p *RedisPubSub) GetPresence(ctx context.Context, userID string) (*model.Presence, error) {
+	defer recordRedisDuration("get_presence", time.Now())
 	key := "presence:" + userID
 	data, err := p.client.Get(ctx, key).Bytes()
 	if err != nil {
@@ -145,20 +153,41 @@ func (p *RedisPubSub) GetPresence(ctx context.Context, userID string) (*model.Pr
 }
 
 func (p *RedisPubSub) GetPresences(ctx context.Context, userIDs []string) (map[string]*model.Presence, error) {
+	defer recordRedisDuration("get_presences", time.Now())
+	if len(userIDs) == 0 {
+		return make(map[string]*model.Presence), nil
+	}
+
+	keys := make([]string, len(userIDs))
+	for i, userID := range userIDs {
+		keys[i] = "presence:" + userID
+	}
+
+	values, err := p.client.MGet(ctx, keys...).Result()
+	if err != nil {
+		return nil, err
+	}
+
 	result := make(map[string]*model.Presence)
-	for _, userID := range userIDs {
-		presence, err := p.GetPresence(ctx, userID)
-		if err != nil {
+	for i, val := range values {
+		if val == nil {
 			continue
 		}
-		if presence != nil {
-			result[userID] = presence
+		strVal, ok := val.(string)
+		if !ok {
+			continue
 		}
+		var presence model.Presence
+		if err := json.Unmarshal([]byte(strVal), &presence); err != nil {
+			continue
+		}
+		result[userIDs[i]] = &presence
 	}
 	return result, nil
 }
 
 func (p *RedisPubSub) SubscribeToRoom(ctx context.Context, roomID, userID string) error {
+	defer recordRedisDuration("subscribe_room", time.Now())
 	key := "room:" + roomID + ":subscribers"
 	if err := p.client.SAdd(ctx, key, userID).Err(); err != nil {
 		return err
@@ -174,6 +203,7 @@ func (p *RedisPubSub) SubscribeToRoom(ctx context.Context, roomID, userID string
 }
 
 func (p *RedisPubSub) UnsubscribeFromRoom(ctx context.Context, roomID, userID string) error {
+	defer recordRedisDuration("unsubscribe_room", time.Now())
 	key := "room:" + roomID + ":subscribers"
 	if err := p.client.SRem(ctx, key, userID).Err(); err != nil {
 		return err
@@ -189,29 +219,63 @@ func (p *RedisPubSub) UnsubscribeFromRoom(ctx context.Context, roomID, userID st
 }
 
 func (p *RedisPubSub) GetRoomSubscribers(ctx context.Context, roomID string) ([]string, error) {
+	defer recordRedisDuration("get_room_subscribers", time.Now())
 	key := "room:" + roomID + ":subscribers"
 	return p.client.SMembers(ctx, key).Result()
 }
 
+var rateLimitLuaScript = redis.NewScript(`
+	local key = KEYS[1]
+	local now = tonumber(ARGV[1])
+	local windowNs = tonumber(ARGV[2])
+	local windowMs = tonumber(ARGV[3])
+	local limit = tonumber(ARGV[4])
+	local member = ARGV[5]
+
+	redis.call('ZREMRANGEBYSCORE', key, 0, now - windowNs)
+	local count = redis.call('ZCARD', key)
+	if count >= limit then
+		return 0
+	end
+	redis.call('ZADD', key, now, member)
+	redis.call('PEXPIRE', key, windowMs)
+	return 1
+`)
+
 func (p *RedisPubSub) CheckRateLimit(ctx context.Context, key string, limit int, window time.Duration) (bool, error) {
+	defer recordRedisDuration("check_rate_limit", time.Now())
 	rateKey := "ratelimit:" + key
 	now := time.Now().UnixNano()
+	member := strconv.FormatInt(now, 10)
 
-	pipe := p.client.Pipeline()
-	pipe.ZRemRangeByScore(ctx, rateKey, "0", strconv.FormatInt(now-int64(window), 10))
-	pipe.ZAdd(ctx, rateKey, redis.Z{Score: float64(now), Member: now})
-	pipe.ZCard(ctx, rateKey)
-	pipe.Expire(ctx, rateKey, window)
-
-	results, err := pipe.Exec(ctx)
+	windowNs := int64(window)
+	windowMs := int64(window / time.Millisecond)
+	if windowMs < 1 {
+		windowMs = 1
+	}
+	result, err := rateLimitLuaScript.Run(ctx, p.client, []string{rateKey}, now, windowNs, windowMs, limit, member).Int()
 	if err != nil {
 		return false, err
 	}
-
-	count := results[2].(*redis.IntCmd).Val()
-	return int(count) <= limit, nil
+	return result == 1, nil
 }
 
 func (p *RedisPubSub) Close() error {
 	return p.client.Close()
+}
+
+func (p *RedisPubSub) InvalidateToken(ctx context.Context, jti string, ttl time.Duration) error {
+	defer recordRedisDuration("invalidate_token", time.Now())
+	key := "token:blacklist:" + jti
+	return p.client.Set(ctx, key, "1", ttl).Err()
+}
+
+func (p *RedisPubSub) IsTokenInvalidated(ctx context.Context, jti string) (bool, error) {
+	defer recordRedisDuration("is_token_invalidated", time.Now())
+	key := "token:blacklist:" + jti
+	count, err := p.client.Exists(ctx, key).Result()
+	if err != nil {
+		return false, err
+	}
+	return count > 0, nil
 }

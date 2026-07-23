@@ -31,12 +31,17 @@ func (g *Generator) Generate() int64 {
 
 	now := time.Now().UnixNano() / 1000000
 	if now < g.lastTime {
-		now = g.lastTime
+		for now < g.lastTime {
+			g.mu.Unlock()
+			time.Sleep(time.Millisecond)
+			g.mu.Lock()
+			now = time.Now().UnixNano() / 1000000
+		}
 	}
 	if now == g.lastTime {
 		g.sequence = (g.sequence + 1) & sequenceMask
 		if g.sequence == 0 {
-			now = g.waitNextMillis(now)
+			now = g.waitNextMillisLocked(now)
 		}
 	} else {
 		g.sequence = 0
@@ -49,24 +54,37 @@ func (g *Generator) Generate() int64 {
 	return id
 }
 
-func (g *Generator) waitNextMillis(currentTime int64) int64 {
-	for currentTime == g.lastTime {
+func (g *Generator) waitNextMillisLocked(currentTime int64) int64 {
+	for {
 		currentTime = time.Now().UnixNano() / 1000000
+		if currentTime > g.lastTime {
+			return currentTime
+		}
+		g.mu.Unlock()
+		time.Sleep(time.Millisecond)
+		g.mu.Lock()
 	}
-	return currentTime
 }
 
 func (g *Generator) String() string {
 	return strconv.FormatInt(g.Generate(), 10)
 }
 
-var defaultGenerator *Generator
+var (
+	defaultGenerator *Generator
+	defaultOnce      sync.Once
+)
 
 func init() {
 	defaultGenerator = New(1)
 }
 
 func Generate() *Generator {
+	defaultOnce.Do(func() {
+		if defaultGenerator == nil {
+			defaultGenerator = New(1)
+		}
+	})
 	return defaultGenerator
 }
 
@@ -74,7 +92,10 @@ func SetNodeID(nodeID int64) error {
 	if nodeID < 0 || nodeID > maxNodeID {
 		return errors.New("node ID must be between 0 and 1023")
 	}
-	defaultGenerator.nodeID = nodeID
+	g := Generate()
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	g.nodeID = nodeID
 	return nil
 }
 

@@ -10,11 +10,11 @@ import (
 )
 
 type UserService struct {
-	userRepo   *repository.UserRepository
+	userRepo   repository.IUserRepository
 	redisCache cache.Cache
 }
 
-func NewUserService(userRepo *repository.UserRepository, redisCache cache.Cache) *UserService {
+func NewUserService(userRepo repository.IUserRepository, redisCache cache.Cache) *UserService {
 	return &UserService{
 		userRepo:   userRepo,
 		redisCache: redisCache,
@@ -53,7 +53,14 @@ func (s *UserService) Update(ctx context.Context, user *model.User) error {
 }
 
 func (s *UserService) Search(ctx context.Context, query string, limit int) ([]*model.User, error) {
-	return s.userRepo.Search(ctx, query, limit)
+	users, err := s.userRepo.Search(ctx, query, limit)
+	if err != nil {
+		return nil, err
+	}
+	for _, u := range users {
+		u.PasswordHash = ""
+	}
+	return users, nil
 }
 
 func (s *UserService) UpdateStatus(ctx context.Context, userID string, status model.UserStatus) error {
