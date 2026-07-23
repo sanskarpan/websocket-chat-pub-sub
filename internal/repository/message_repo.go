@@ -19,6 +19,7 @@ func NewMessageRepository(db *pgxpool.Pool) *MessageRepository {
 }
 
 func (r *MessageRepository) Create(ctx context.Context, msg *model.Message) error {
+	defer recordQueryDuration("create_message", time.Now())
 	msg.ID = snowflake.Generate().String()
 	msg.CreatedAt = time.Now()
 
@@ -40,6 +41,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *model.Message) erro
 }
 
 func (r *MessageRepository) GetByID(ctx context.Context, id string) (*model.Message, error) {
+	defer recordQueryDuration("get_message_by_id", time.Now())
 	query := `
 		SELECT id, room_id, user_id, content, content_type, parent_id, thread_count,
 			edited_at, deleted_at, deleted_by, reactions, attachments, metadata, created_at, client_timestamp
@@ -62,6 +64,7 @@ func (r *MessageRepository) GetByID(ctx context.Context, id string) (*model.Mess
 }
 
 func (r *MessageRepository) GetByRoom(ctx context.Context, roomID string, limit int, before *time.Time) ([]*model.Message, error) {
+	defer recordQueryDuration("get_messages_by_room", time.Now())
 	var query string
 	var args []interface{}
 
@@ -113,6 +116,7 @@ func (r *MessageRepository) GetByRoom(ctx context.Context, roomID string, limit 
 }
 
 func (r *MessageRepository) Update(ctx context.Context, msg *model.Message) error {
+	defer recordQueryDuration("update_message", time.Now())
 	query := `
 		UPDATE messages SET content = $2, edited_at = $3, reactions = $4, attachments = $5, metadata = $6
 		WHERE id = $1
@@ -128,6 +132,7 @@ func (r *MessageRepository) Update(ctx context.Context, msg *model.Message) erro
 }
 
 func (r *MessageRepository) UpdateReactions(ctx context.Context, msgID string, reactions map[string][]string) error {
+	defer recordQueryDuration("update_reactions", time.Now())
 	reactionsJSON, err := json.Marshal(reactions)
 	if err != nil {
 		return err
@@ -138,6 +143,7 @@ func (r *MessageRepository) UpdateReactions(ctx context.Context, msgID string, r
 }
 
 func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, transform func(current map[string][]string) (map[string][]string, error)) error {
+	defer recordQueryDuration("update_reactions_tx", time.Now())
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -177,12 +183,14 @@ func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string,
 }
 
 func (r *MessageRepository) Delete(ctx context.Context, id, deletedBy string) error {
+	defer recordQueryDuration("delete_message", time.Now())
 	query := `UPDATE messages SET deleted_at = $2, deleted_by = $3 WHERE id = $1 AND deleted_at IS NULL`
 	_, err := r.db.Exec(ctx, query, id, time.Now(), deletedBy)
 	return err
 }
 
 func (r *MessageRepository) GetThread(ctx context.Context, parentID string, limit int) ([]*model.Message, error) {
+	defer recordQueryDuration("get_thread", time.Now())
 	query := `
 		SELECT id, room_id, user_id, content, content_type, parent_id, thread_count,
 			edited_at, deleted_at, deleted_by, reactions, attachments, metadata, created_at, client_timestamp
