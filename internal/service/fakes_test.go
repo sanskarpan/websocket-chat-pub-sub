@@ -124,6 +124,21 @@ func (r *FakeRoomRepository) Create(ctx context.Context, room *model.Room) error
 	return nil
 }
 
+func (r *FakeRoomRepository) CreateRoomWithOwner(ctx context.Context, room *model.Room, owner *model.RoomMember) error {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if room.ID == "" {
+		room.ID = "room-" + room.Name
+	}
+	room.CreatedAt = time.Now()
+	room.UpdatedAt = time.Now()
+	r.rooms[room.ID] = room
+	owner.RoomID = room.ID
+	owner.JoinedAt = time.Now()
+	r.members[key(owner.RoomID, owner.UserID)] = owner
+	return nil
+}
+
 func (r *FakeRoomRepository) GetByID(ctx context.Context, id string) (*model.Room, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
@@ -330,11 +345,18 @@ func (r *FakeMessageRepository) UpdateReactions(ctx context.Context, msgID strin
 	return nil
 }
 
-func (r *FakeMessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, reactions map[string][]string) error {
+func (r *FakeMessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, transform func(current map[string][]string) (map[string][]string, error)) error {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if msg, ok := r.messages[msgID]; ok {
-		msg.Reactions = reactions
+		if msg.Reactions == nil {
+			msg.Reactions = make(map[string][]string)
+		}
+		newReactions, err := transform(msg.Reactions)
+		if err != nil {
+			return err
+		}
+		msg.Reactions = newReactions
 	}
 	return nil
 }

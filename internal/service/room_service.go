@@ -49,16 +49,11 @@ func (s *RoomService) Create(ctx context.Context, input CreateRoomInput) (*model
 		MemberCount: 1,
 	}
 
-	if err := s.roomRepo.Create(ctx, room); err != nil {
-		return nil, err
-	}
-
-	member := &model.RoomMember{
-		RoomID:     room.ID,
-		UserID:     input.CreatedBy,
-		Role:       model.RoleOwner,
-		JoinedAt:   time.Now(),
-		LastReadAt: time.Now(),
+	owner := &model.RoomMember{
+		RoomID:   "",
+		UserID:   input.CreatedBy,
+		Role:     model.RoleOwner,
+		JoinedAt: time.Now(),
 		Notifications: model.NotificationSettings{
 			Enabled:      true,
 			MentionsOnly: false,
@@ -66,7 +61,7 @@ func (s *RoomService) Create(ctx context.Context, input CreateRoomInput) (*model
 		},
 	}
 
-	if err := s.roomRepo.AddMember(ctx, member); err != nil {
+	if err := s.roomRepo.CreateRoomWithOwner(ctx, room, owner); err != nil {
 		return nil, err
 	}
 

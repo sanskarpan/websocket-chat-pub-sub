@@ -137,7 +137,7 @@ func (r *MessageRepository) UpdateReactions(ctx context.Context, msgID string, r
 	return err
 }
 
-func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, reactions map[string][]string) error {
+func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, transform func(current map[string][]string) (map[string][]string, error)) error {
 	tx, err := r.db.Begin(ctx)
 	if err != nil {
 		return err
@@ -150,7 +150,22 @@ func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string,
 		return err
 	}
 
-	reactionsJSON, err := json.Marshal(reactions)
+	var current map[string][]string
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &current); err != nil {
+			return err
+		}
+	}
+	if current == nil {
+		current = make(map[string][]string)
+	}
+
+	newReactions, err := transform(current)
+	if err != nil {
+		return err
+	}
+
+	reactionsJSON, err := json.Marshal(newReactions)
 	if err != nil {
 		return err
 	}

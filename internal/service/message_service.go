@@ -181,33 +181,20 @@ func (s *MessageService) AddReaction(ctx context.Context, msgID, emoji, userID s
 		return errors.New("cannot react to deleted message")
 	}
 
-	if msg.Reactions == nil {
-		msg.Reactions = make(map[string][]string)
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, userID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
-	for _, u := range msg.Reactions[emoji] {
-		if u == userID {
-			return nil
+	return s.messageRepo.UpdateReactionsTx(ctx, msgID, func(current map[string][]string) (map[string][]string, error) {
+		for _, u := range current[emoji] {
+			if u == userID {
+				return current, nil
+			}
 		}
-	}
-
-	msg.Reactions[emoji] = append(msg.Reactions[emoji], userID)
-	if err := s.messageRepo.UpdateReactionsTx(ctx, msg.ID, msg.Reactions); err != nil {
-		return err
-	}
-
-	if s.pubsub != nil {
-		data, _ := json.Marshal(map[string]interface{}{
-			"room_id":    msg.RoomID,
-			"message_id": msgID,
-			"emoji":      emoji,
-			"user_id":    userID,
-			"action":     "added",
-		})
-		s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
-	}
-
-	return nil
+		current[emoji] = append(current[emoji], userID)
+		return current, nil
+	})
 }
 
 func (s *MessageService) RemoveReaction(ctx context.Context, msgID, emoji, userID string) error {
@@ -220,34 +207,22 @@ func (s *MessageService) RemoveReaction(ctx context.Context, msgID, emoji, userI
 		return errors.New("cannot remove reaction from deleted message")
 	}
 
-	if msg.Reactions != nil {
-		users := msg.Reactions[emoji]
-		found := false
-		for i, u := range users {
-			if u == userID {
-				msg.Reactions[emoji] = append(users[:i], users[i+1:]...)
-				found = true
-				break
-			}
-		}
-		if !found {
-			return nil
-		}
-		if err := s.messageRepo.UpdateReactionsTx(ctx, msg.ID, msg.Reactions); err != nil {
-			return err
-		}
-
-		if s.pubsub != nil {
-			data, _ := json.Marshal(map[string]interface{}{
-				"room_id":    msg.RoomID,
-				"message_id": msgID,
-				"emoji":      emoji,
-				"user_id":    userID,
-				"action":     "removed",
-			})
-			s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
-		}
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, userID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
-	return nil
+	return s.messageRepo.UpdateReactionsTx(ctx, msgID, func(current map[string][]string) (map[string][]string, error) {
+		users := current[emoji]
+		for i, u := range users {
+			if u == userID {
+				current[emoji] = append(users[:i], users[i+1:]...)
+				if len(current[emoji]) == 0 {
+					delete(current, emoji)
+				}
+				return current, nil
+			}
+		}
+		return current, nil
+	})
 }

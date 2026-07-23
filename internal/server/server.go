@@ -378,6 +378,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 	defer func() {
 		if r := recover(); r != nil {
 			s.logger.Error().Interface("panic", r).Msg("panic in handleWebSocket")
+			if ipCounter != nil {
+				ipCounter.Add(-1)
+			}
 		}
 	}()
 

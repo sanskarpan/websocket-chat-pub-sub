@@ -39,6 +39,45 @@ func (r *RoomRepository) Create(ctx context.Context, room *model.Room) error {
 	return err
 }
 
+func (r *RoomRepository) CreateRoomWithOwner(ctx context.Context, room *model.Room, owner *model.RoomMember) error {
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	room.ID = uuid.New().String()
+	room.CreatedAt = time.Now()
+	room.UpdatedAt = time.Now()
+
+	settings, err := json.Marshal(room.Settings)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO rooms (id, name, type, description, avatar_url, created_by, created_at, updated_at, archived_at, settings, member_count)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+	`, room.ID, room.Name, room.Type, room.Description, room.AvatarURL, room.CreatedBy, room.CreatedAt, room.UpdatedAt, room.ArchivedAt, settings, room.MemberCount); err != nil {
+		return err
+	}
+
+	owner.RoomID = room.ID
+	owner.JoinedAt = time.Now()
+	if owner.LastReadAt.IsZero() {
+		owner.LastReadAt = time.Now()
+	}
+	notif, _ := json.Marshal(owner.Notifications)
+	if _, err := tx.Exec(ctx, `
+		INSERT INTO room_members (room_id, user_id, role, joined_at, last_read_at, notifications)
+		VALUES ($1, $2, $3, $4, $5, $6)
+	`, owner.RoomID, owner.UserID, owner.Role, owner.JoinedAt, owner.LastReadAt, notif); err != nil {
+		return err
+	}
+
+	return tx.Commit(ctx)
+}
+
 func (r *RoomRepository) GetByID(ctx context.Context, id string) (*model.Room, error) {
 	query := `
 		SELECT id, name, type, description, avatar_url, created_by, created_at, updated_at, archived_at, settings, member_count
