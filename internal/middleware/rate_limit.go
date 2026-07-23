@@ -25,12 +25,7 @@ func RateLimitMiddleware(ps pubsub.PubSub, actionKey string, limit int, window t
 
 		key := actionKey + ":" + identifier
 		allowed, err := ps.CheckRateLimit(c.Request.Context(), key, limit, window)
-		if err != nil {
-			c.Next()
-			return
-		}
-
-		if !allowed {
+		if err != nil || !allowed {
 			metrics.RateLimitedRequestsTotal.WithLabelValues(actionKey).Inc()
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code":        "RATE_LIMIT_EXCEEDED",
