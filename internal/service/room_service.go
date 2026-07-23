@@ -15,13 +15,15 @@ type RoomService struct {
 	roomRepo   repository.IRoomRepository
 	userRepo   repository.IUserRepository
 	redisCache cache.Cache
+	ps         pubsub.PubSub
 }
 
-func NewRoomService(roomRepo repository.IRoomRepository, userRepo repository.IUserRepository, redisCache cache.Cache) *RoomService {
+func NewRoomService(roomRepo repository.IRoomRepository, userRepo repository.IUserRepository, redisCache cache.Cache, ps pubsub.PubSub) *RoomService {
 	return &RoomService{
 		roomRepo:   roomRepo,
 		userRepo:   userRepo,
 		redisCache: redisCache,
+		ps:         ps,
 	}
 }
 
@@ -148,7 +150,7 @@ func (s *RoomService) IsMember(ctx context.Context, roomID, userID string) (bool
 	return s.roomRepo.IsMember(ctx, roomID, userID)
 }
 
-func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pubsub.PubSub) error {
+func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string) error {
 	if _, err := s.roomRepo.GetByID(ctx, roomID); err != nil {
 		return errors.New("room not found")
 	}
@@ -184,24 +186,16 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string, ps pu
 		}
 	}
 
-	if ps != nil {
-		ps.SubscribeToRoom(ctx, roomID, userID)
+	if s.ps != nil {
+		s.ps.SubscribeToRoom(ctx, roomID, userID)
 	}
 
 	return nil
 }
 
-func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string, ps pubsub.PubSub) error {
-	member, err := s.roomRepo.GetMember(ctx, roomID, userID)
-	if err != nil || member == nil {
+func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string) error {
+	if _, err := s.roomRepo.GetMember(ctx, roomID, userID); err != nil {
 		return errors.New("not a member of this room")
-	}
-
-	if member.Role == model.RoleOwner {
-		count, err := s.roomRepo.GetMembers(ctx, roomID)
-		if err == nil && len(count) == 1 {
-			return errors.New("cannot leave room as the only owner; transfer ownership or delete the room")
-		}
 	}
 
 	if err := s.roomRepo.LeaveRoomTx(ctx, roomID, userID); err != nil {
@@ -211,8 +205,8 @@ func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string, ps p
 		s.redisCache.Del(ctx, "room:"+roomID)
 	}
 
-	if ps != nil {
-		ps.UnsubscribeFromRoom(ctx, roomID, userID)
+	if s.ps != nil {
+		s.ps.UnsubscribeFromRoom(ctx, roomID, userID)
 	}
 
 	return nil
