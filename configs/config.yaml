@@ -46,9 +46,9 @@ redis:
 
 auth:
   jwt:
-    algorithm: "HS256"
-    private_key: "${JWT_SECRET}"
-    public_key: "${JWT_SECRET}"
+    algorithm: "RS256"
+    private_key_path: "configs/jwt-private.pem"
+    public_key_path: "configs/jwt-public.pem"
     access_token_ttl: 15m
     refresh_token_ttl: 168h
     issuer: "chat-app"

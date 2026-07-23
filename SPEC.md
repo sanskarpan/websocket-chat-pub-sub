@@ -1,6 +1,15 @@
 # WebSocket Chat System with Pub-Sub
 ## Production-Ready Real-Time Communication Platform
 
+> **Implementation Status Note**: This SPEC describes the *target* system architecture. Features marked as "Implemented" in this document may differ from the actual code. The current implementation focuses on:
+> - REST API (Gin) + WebSocket (gorilla/websocket)
+> - HS256 JWT auth (not RS256)
+> - PostgreSQL persistence + Redis Pub/Sub backplane + Redis cache
+> - Single-node WebSocket server (no Redis Cluster setup)
+> - In-memory Hub for connection routing
+>
+> **Not yet implemented**: File upload (MinIO/S3), ClickHouse analytics, gRPC, RS256 JWT, OpenAPI spec, message partitioning. See `audit.md` for the latest audit of what's actually in the codebase.
+
 ---
 
 ## Executive Summary
