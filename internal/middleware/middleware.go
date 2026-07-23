@@ -1,9 +1,28 @@
 package middleware
 
 import (
+	"log"
+	"time"
+
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 )
+
+func RequestLoggingMiddleware(appName string) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		start := time.Now()
+		path := c.Request.URL.Path
+		method := c.Request.Method
+
+		c.Next()
+
+		statusCode := c.Writer.Status()
+		duration := time.Since(start)
+		requestID, _ := c.Get("request_id")
+
+		log.Printf("[%s] %s %s %d %s request_id=%v", appName, method, path, statusCode, duration, requestID)
+	}
+}
 
 func CORSMiddleware(allowedOrigins []string) gin.HandlerFunc {
 	hasWildcard := false
