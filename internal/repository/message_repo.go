@@ -19,6 +19,7 @@ func NewMessageRepository(db *pgxpool.Pool) *MessageRepository {
 }
 
 func (r *MessageRepository) Create(ctx context.Context, msg *model.Message) error {
+	defer recordQueryDuration("create_message", time.Now())
 	msg.ID = snowflake.Generate().String()
 	msg.CreatedAt = time.Now()
 
@@ -40,6 +41,7 @@ func (r *MessageRepository) Create(ctx context.Context, msg *model.Message) erro
 }
 
 func (r *MessageRepository) GetByID(ctx context.Context, id string) (*model.Message, error) {
+	defer recordQueryDuration("get_message_by_id", time.Now())
 	query := `
 		SELECT id, room_id, user_id, content, content_type, parent_id, thread_count,
 			edited_at, deleted_at, deleted_by, reactions, attachments, metadata, created_at, client_timestamp
@@ -62,6 +64,7 @@ func (r *MessageRepository) GetByID(ctx context.Context, id string) (*model.Mess
 }
 
 func (r *MessageRepository) GetByRoom(ctx context.Context, roomID string, limit int, before *time.Time) ([]*model.Message, error) {
+	defer recordQueryDuration("get_messages_by_room", time.Now())
 	var query string
 	var args []interface{}
 
@@ -106,17 +109,20 @@ func (r *MessageRepository) GetByRoom(ctx context.Context, roomID string, limit 
 		json.Unmarshal(metadata, &msg.Metadata)
 		messages = append(messages, &msg)
 	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
 	return messages, nil
 }
 
 func (r *MessageRepository) Update(ctx context.Context, msg *model.Message) error {
-	msg.EditedAt = new(time.Time)
-	*msg.EditedAt = time.Now()
-
+	defer recordQueryDuration("update_message", time.Now())
 	query := `
 		UPDATE messages SET content = $2, edited_at = $3, reactions = $4, attachments = $5, metadata = $6
 		WHERE id = $1
 	`
+	now := time.Now()
+	msg.EditedAt = &now
 	reactions, _ := json.Marshal(msg.Reactions)
 	attachments, _ := json.Marshal(msg.Attachments)
 	metadata, _ := json.Marshal(msg.Metadata)
@@ -125,13 +131,66 @@ func (r *MessageRepository) Update(ctx context.Context, msg *model.Message) erro
 	return err
 }
 
+func (r *MessageRepository) UpdateReactions(ctx context.Context, msgID string, reactions map[string][]string) error {
+	defer recordQueryDuration("update_reactions", time.Now())
+	reactionsJSON, err := json.Marshal(reactions)
+	if err != nil {
+		return err
+	}
+	query := `UPDATE messages SET reactions = $2 WHERE id = $1`
+	_, err = r.db.Exec(ctx, query, msgID, reactionsJSON)
+	return err
+}
+
+func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string, transform func(current map[string][]string) (map[string][]string, error)) error {
+	defer recordQueryDuration("update_reactions_tx", time.Now())
+	tx, err := r.db.Begin(ctx)
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback(ctx)
+
+	var existing []byte
+	row := tx.QueryRow(ctx, `SELECT reactions FROM messages WHERE id = $1 FOR UPDATE`, msgID)
+	if err := row.Scan(&existing); err != nil {
+		return err
+	}
+
+	var current map[string][]string
+	if len(existing) > 0 {
+		if err := json.Unmarshal(existing, &current); err != nil {
+			return err
+		}
+	}
+	if current == nil {
+		current = make(map[string][]string)
+	}
+
+	newReactions, err := transform(current)
+	if err != nil {
+		return err
+	}
+
+	reactionsJSON, err := json.Marshal(newReactions)
+	if err != nil {
+		return err
+	}
+
+	if _, err := tx.Exec(ctx, `UPDATE messages SET reactions = $2 WHERE id = $1`, msgID, reactionsJSON); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
 func (r *MessageRepository) Delete(ctx context.Context, id, deletedBy string) error {
+	defer recordQueryDuration("delete_message", time.Now())
 	query := `UPDATE messages SET deleted_at = $2, deleted_by = $3 WHERE id = $1 AND deleted_at IS NULL`
 	_, err := r.db.Exec(ctx, query, id, time.Now(), deletedBy)
 	return err
 }
 
 func (r *MessageRepository) GetThread(ctx context.Context, parentID string, limit int) ([]*model.Message, error) {
+	defer recordQueryDuration("get_thread", time.Now())
 	query := `
 		SELECT id, room_id, user_id, content, content_type, parent_id, thread_count,
 			edited_at, deleted_at, deleted_by, reactions, attachments, metadata, created_at, client_timestamp
@@ -160,6 +219,9 @@ func (r *MessageRepository) GetThread(ctx context.Context, parentID string, limi
 		json.Unmarshal(attachments, &msg.Attachments)
 		json.Unmarshal(metadata, &msg.Metadata)
 		messages = append(messages, &msg)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
 	}
 	return messages, nil
 }

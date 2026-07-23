@@ -4,22 +4,54 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
+	"sync"
 	"time"
 
 	"github.com/websocket-chat/internal/config"
 	"github.com/websocket-chat/internal/model"
 	"github.com/websocket-chat/internal/pubsub"
 	"github.com/websocket-chat/internal/repository"
+	"github.com/websocket-chat/internal/tracing"
+	"github.com/websocket-chat/pkg/sanitization"
+	"github.com/websocket-chat/pkg/validator"
 )
 
+type dedupEntry struct {
+	msgID     string
+	timestamp time.Time
+}
+
+var (
+	clientDedup   sync.Map
+	dedupTTL      = 5 * time.Minute
+	dedupCleanup  = 10 * time.Minute
+)
+
+func init() {
+	go func() {
+		for {
+			time.Sleep(dedupCleanup)
+			now := time.Now()
+			clientDedup.Range(func(key, value interface{}) bool {
+				entry := value.(dedupEntry)
+				if now.Sub(entry.timestamp) > dedupTTL {
+					clientDedup.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
+}
+
 type MessageService struct {
-	messageRepo *repository.MessageRepository
-	roomRepo    *repository.RoomRepository
+	messageRepo repository.IMessageRepository
+	roomRepo    repository.IRoomRepository
 	pubsub      pubsub.PubSub
 	cfg         *config.Config
 }
 
-func NewMessageService(messageRepo *repository.MessageRepository, roomRepo *repository.RoomRepository, ps pubsub.PubSub, cfg *config.Config) *MessageService {
+func NewMessageService(messageRepo repository.IMessageRepository, roomRepo repository.IRoomRepository, ps pubsub.PubSub, cfg *config.Config) *MessageService {
 	return &MessageService{
 		messageRepo: messageRepo,
 		roomRepo:    roomRepo,
@@ -38,16 +70,50 @@ type SendMessageInput struct {
 }
 
 func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput) (*model.Message, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.send")
+	defer spanEnd()
+
+	if input.ClientID != "" {
+		if existing, err := s.checkDedup(ctx, input.UserID, input.ClientID); err == nil {
+			return existing, nil
+		}
+	}
+
+	content := sanitization.SanitizeMessage(input.Content)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return nil, errors.New("content cannot be empty")
+	}
+	if err := validator.ValidateMessageContent(content); err != nil {
+		return nil, err
+	}
+
+	if _, err := s.roomRepo.GetByID(ctx, input.RoomID); err != nil {
+		return nil, errors.New("room not found")
+	}
+
+	isMember, err := s.roomRepo.IsMember(ctx, input.RoomID, input.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if !isMember {
+		return nil, errors.New("unauthorized: not a member of this room")
+	}
+
 	msg := &model.Message{
 		RoomID:      input.RoomID,
 		UserID:      input.UserID,
-		Content:     input.Content,
+		Content:     content,
 		ContentType: input.ContentType,
 		ParentID:    input.ParentID,
 	}
 
 	if err := s.messageRepo.Create(ctx, msg); err != nil {
 		return nil, err
+	}
+
+	if input.ClientID != "" {
+		markDedup(input.UserID, input.ClientID, msg.ID)
 	}
 
 	if s.pubsub != nil {
@@ -61,22 +127,64 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 	return msg, nil
 }
 
+func (s *MessageService) checkDedup(ctx context.Context, userID, clientID string) (*model.Message, error) {
+	key := userID + ":" + clientID
+	if v, ok := clientDedup.Load(key); ok {
+		entry := v.(dedupEntry)
+		existing, err := s.messageRepo.GetByID(ctx, entry.msgID)
+		if err == nil {
+			return existing, nil
+		}
+		clientDedup.Delete(key)
+	}
+	return nil, errors.New("not a duplicate")
+}
+
+func markDedup(userID, clientID, msgID string) {
+	key := userID + ":" + clientID
+	clientDedup.Store(key, dedupEntry{msgID: msgID, timestamp: time.Now()})
+}
+
 func (s *MessageService) GetMessage(ctx context.Context, id string) (*model.Message, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.get")
+	defer spanEnd()
 	return s.messageRepo.GetByID(ctx, id)
 }
 
 func (s *MessageService) GetRoomMessages(ctx context.Context, roomID string, limit int, before *time.Time) ([]*model.Message, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.get_room")
+	defer spanEnd()
 	return s.messageRepo.GetByRoom(ctx, roomID, limit, before)
 }
 
 func (s *MessageService) EditMessage(ctx context.Context, msgID, requesterID, content string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.edit")
+	defer spanEnd()
+	content = sanitization.SanitizeMessage(content)
+	content = strings.TrimSpace(content)
+	if content == "" {
+		return errors.New("content cannot be empty")
+	}
+	if err := validator.ValidateMessageContent(content); err != nil {
+		return err
+	}
+
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
 	}
 
+	if msg.DeletedAt != nil {
+		return errors.New("cannot edit deleted message")
+	}
+
 	if msg.UserID != requesterID {
 		return errors.New("unauthorized: only message author can edit this message")
+	}
+
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
 	msg.Content = content
@@ -97,30 +205,30 @@ func (s *MessageService) EditMessage(ctx context.Context, msgID, requesterID, co
 }
 
 func (s *MessageService) DeleteMessage(ctx context.Context, msgID, requesterID string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.delete")
+	defer spanEnd()
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
 	}
 
+	if msg.DeletedAt != nil {
+		return errors.New("message already deleted")
+	}
+
 	if msg.UserID != requesterID {
-		isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
-		if err != nil || !isMember {
+		member, err := s.roomRepo.GetMember(ctx, msg.RoomID, requesterID)
+		if err != nil || member == nil {
 			return errors.New("unauthorized: permission denied to delete this message")
 		}
-		members, err := s.roomRepo.GetMembers(ctx, msg.RoomID)
-		if err != nil {
-			return errors.New("unauthorized: permission denied")
-		}
-		authorized := false
-		for _, m := range members {
-			if m.UserID == requesterID && (m.Role == model.RoleOwner || m.Role == model.RoleAdmin || m.Role == model.RoleModerator) {
-				authorized = true
-				break
-			}
-		}
-		if !authorized {
+		if member.Role != model.RoleOwner && member.Role != model.RoleAdmin && member.Role != model.RoleModerator {
 			return errors.New("unauthorized: only author or room moderator/admin can delete this message")
 		}
+	}
+
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
 	if err := s.messageRepo.Delete(ctx, msgID, requesterID); err != nil {
@@ -144,63 +252,61 @@ func (s *MessageService) GetThread(ctx context.Context, parentID string, limit i
 }
 
 func (s *MessageService) AddReaction(ctx context.Context, msgID, emoji, userID string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.add_reaction")
+	defer spanEnd()
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
 	}
 
-	if msg.Reactions == nil {
-		msg.Reactions = make(map[string][]string)
+	if msg.DeletedAt != nil {
+		return errors.New("cannot react to deleted message")
 	}
 
-	msg.Reactions[emoji] = append(msg.Reactions[emoji], userID)
-	if err := s.messageRepo.Update(ctx, msg); err != nil {
-		return err
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, userID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
 	}
 
-	if s.pubsub != nil {
-		data, _ := json.Marshal(map[string]interface{}{
-			"room_id":    msg.RoomID,
-			"message_id": msgID,
-			"emoji":      emoji,
-			"user_id":    userID,
-			"action":     "added",
-		})
-		s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
-	}
-
-	return nil
+	return s.messageRepo.UpdateReactionsTx(ctx, msgID, func(current map[string][]string) (map[string][]string, error) {
+		for _, u := range current[emoji] {
+			if u == userID {
+				return current, nil
+			}
+		}
+		current[emoji] = append(current[emoji], userID)
+		return current, nil
+	})
 }
 
 func (s *MessageService) RemoveReaction(ctx context.Context, msgID, emoji, userID string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.remove_reaction")
+	defer spanEnd()
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
 	}
 
-	if msg.Reactions != nil {
-		users := msg.Reactions[emoji]
-		for i, u := range users {
-			if u == userID {
-				msg.Reactions[emoji] = append(users[:i], users[i+1:]...)
-				break
-			}
-		}
-		if err := s.messageRepo.Update(ctx, msg); err != nil {
-			return err
-		}
-
-		if s.pubsub != nil {
-			data, _ := json.Marshal(map[string]interface{}{
-				"room_id":    msg.RoomID,
-				"message_id": msgID,
-				"emoji":      emoji,
-				"user_id":    userID,
-				"action":     "removed",
-			})
-			s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
-		}
+	if msg.DeletedAt != nil {
+		return errors.New("cannot remove reaction from deleted message")
 	}
 
-	return nil
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, userID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
+	}
+
+	return s.messageRepo.UpdateReactionsTx(ctx, msgID, func(current map[string][]string) (map[string][]string, error) {
+		users := current[emoji]
+		for i, u := range users {
+			if u == userID {
+				current[emoji] = append(users[:i], users[i+1:]...)
+				if len(current[emoji]) == 0 {
+					delete(current, emoji)
+				}
+				return current, nil
+			}
+		}
+		return current, nil
+	})
 }
