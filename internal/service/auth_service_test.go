@@ -2,6 +2,10 @@ package service_test
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/rsa"
+	"crypto/x509"
+	"encoding/pem"
 	"testing"
 	"time"
 
@@ -13,13 +17,32 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
-func testConfig() *config.Config {
+func testRSAKeyPair(t *testing.T) (privPEM, pubPEM string) {
+	t.Helper()
+	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)
+	require.NoError(t, err)
+
+	privBytes, err := x509.MarshalPKCS8PrivateKey(privateKey)
+	require.NoError(t, err)
+	privPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privBytes}))
+
+	pubBytes, err := x509.MarshalPKIXPublicKey(&privateKey.PublicKey)
+	require.NoError(t, err)
+	pubPEM = string(pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: pubBytes}))
+
+	return privPEM, pubPEM
+}
+
+func testConfig(t *testing.T) *config.Config {
+	t.Helper()
+	privPEM, pubPEM := testRSAKeyPair(t)
 	return &config.Config{
 		App: config.AppConfig{Name: "test", Version: "1.0.0", Environment: "development"},
 		Auth: config.AuthConfig{
 			JWT: config.JWTConfig{
-				Algorithm:       "HS256",
-				PrivateKey:      "test-secret-key-that-is-at-least-32-chars-long-for-jwt-hmac-sha256",
+				Algorithm:       "RS256",
+				PrivateKey:      privPEM,
+				PublicKey:       pubPEM,
 				AccessTokenTTL:  15 * time.Minute,
 				RefreshTokenTTL: 7 * 24 * time.Hour,
 				Issuer:          "test-issuer",
@@ -31,7 +54,7 @@ func testConfig() *config.Config {
 }
 
 func TestAuthService_Register_Success(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -52,7 +75,7 @@ func TestAuthService_Register_Success(t *testing.T) {
 }
 
 func TestAuthService_Register_UsernameExists(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -72,7 +95,7 @@ func TestAuthService_Register_UsernameExists(t *testing.T) {
 }
 
 func TestAuthService_Register_EmailExists(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -92,7 +115,7 @@ func TestAuthService_Register_EmailExists(t *testing.T) {
 }
 
 func TestAuthService_Register_InvalidEmail(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -105,7 +128,7 @@ func TestAuthService_Register_InvalidEmail(t *testing.T) {
 }
 
 func TestAuthService_Register_ShortUsername(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -118,7 +141,7 @@ func TestAuthService_Register_ShortUsername(t *testing.T) {
 }
 
 func TestAuthService_Register_ShortPassword(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -131,7 +154,7 @@ func TestAuthService_Register_ShortPassword(t *testing.T) {
 }
 
 func TestAuthService_Register_SanitizesXSS(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -146,7 +169,7 @@ func TestAuthService_Register_SanitizesXSS(t *testing.T) {
 }
 
 func TestAuthService_Login_Success(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -167,7 +190,7 @@ func TestAuthService_Login_Success(t *testing.T) {
 }
 
 func TestAuthService_Login_InvalidEmail(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -179,7 +202,7 @@ func TestAuthService_Login_InvalidEmail(t *testing.T) {
 }
 
 func TestAuthService_Login_WrongPassword(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -198,7 +221,7 @@ func TestAuthService_Login_WrongPassword(t *testing.T) {
 }
 
 func TestAuthService_ValidateToken(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -221,7 +244,7 @@ func TestAuthService_ValidateToken(t *testing.T) {
 }
 
 func TestAuthService_ValidateToken_Invalid(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
@@ -230,7 +253,7 @@ func TestAuthService_ValidateToken_Invalid(t *testing.T) {
 }
 
 func TestAuthService_RefreshToken_InvalidatesOld(t *testing.T) {
-	cfg := testConfig()
+	cfg := testConfig(t)
 	userRepo := NewFakeUserRepository()
 	authService := service.NewAuthService(cfg, userRepo)
 
