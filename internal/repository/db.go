@@ -7,7 +7,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/websocket-chat/internal/config"
+	"github.com/websocket-chat/internal/metrics"
 )
+
+func recordQueryDuration(queryType string, start time.Time) {
+	metrics.DBQueryDuration.WithLabelValues(queryType).Observe(time.Since(start).Seconds())
+}
 
 func NewPostgresDB(cfg *config.Config) (*pgxpool.Pool, error) {
 	dsn := fmt.Sprintf(
