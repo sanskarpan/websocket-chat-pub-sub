@@ -22,7 +22,7 @@ func TestRoomService_Create(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	roomService := service.NewRoomService(roomRepo, userRepo, nil)
+	roomService := service.NewRoomService(roomRepo, userRepo, nil, nil)
 	room, err := roomService.Create(context.Background(), service.CreateRoomInput{
 		Name:        "general",
 		Type:        model.RoomTypeChannel,
@@ -46,7 +46,7 @@ func TestRoomService_JoinRoom_IncrementsMemberCount(t *testing.T) {
 	err = userRepo.Create(context.Background(), &model.User{ID: "user-2", Username: "u2", Email: "u2@example.com"})
 	require.NoError(t, err)
 
-	roomService := service.NewRoomService(roomRepo, userRepo, nil)
+	roomService := service.NewRoomService(roomRepo, userRepo, nil, nil)
 	room, err := roomService.Create(context.Background(), service.CreateRoomInput{
 		Name:      "test",
 		Type:      model.RoomTypeGroup,
@@ -54,7 +54,7 @@ func TestRoomService_JoinRoom_IncrementsMemberCount(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	err = roomService.JoinRoom(context.Background(), room.ID, "user-2", nil)
+	err = roomService.JoinRoom(context.Background(), room.ID, "user-2")
 	require.NoError(t, err)
 
 	updated, err := roomRepo.GetByID(context.Background(), room.ID)
@@ -71,14 +71,14 @@ func TestRoomService_LeaveRoom_DecrementsMemberCount(t *testing.T) {
 	err = userRepo.Create(context.Background(), &model.User{ID: "user-2", Username: "u2", Email: "u2@example.com"})
 	require.NoError(t, err)
 
-	roomService := service.NewRoomService(roomRepo, userRepo, nil)
+	roomService := service.NewRoomService(roomRepo, userRepo, nil, nil)
 	room, err := roomService.Create(context.Background(), service.CreateRoomInput{
 		Name: "test", Type: model.RoomTypeGroup, CreatedBy: "user-1",
 	})
 	require.NoError(t, err)
 
-	require.NoError(t, roomService.JoinRoom(context.Background(), room.ID, "user-2", nil))
-	require.NoError(t, roomService.LeaveRoom(context.Background(), room.ID, "user-2", nil))
+	require.NoError(t, roomService.JoinRoom(context.Background(), room.ID, "user-2"))
+	require.NoError(t, roomService.LeaveRoom(context.Background(), room.ID, "user-2"))
 
 	updated, err := roomRepo.GetByID(context.Background(), room.ID)
 	require.NoError(t, err)
@@ -92,7 +92,7 @@ func TestRoomService_IsMember(t *testing.T) {
 	err := userRepo.Create(context.Background(), &model.User{ID: "user-1", Username: "u1", Email: "u1@example.com"})
 	require.NoError(t, err)
 
-	roomService := service.NewRoomService(roomRepo, userRepo, nil)
+	roomService := service.NewRoomService(roomRepo, userRepo, nil, nil)
 	room, err := roomService.Create(context.Background(), service.CreateRoomInput{
 		Name: "test", Type: model.RoomTypeGroup, CreatedBy: "user-1",
 	})
@@ -110,6 +110,9 @@ func TestRoomService_IsMember(t *testing.T) {
 func TestMessageService_SendMessage_ValidatesContent(t *testing.T) {
 	messageRepo := NewFakeMessageRepository()
 	roomRepo := NewFakeRoomRepository()
+
+	roomRepo.rooms["room-1"] = &model.Room{ID: "room-1", Type: model.RoomTypeGroup, CreatedBy: "user-1"}
+	roomRepo.members[key("room-1", "user-1")] = &model.RoomMember{RoomID: "room-1", UserID: "user-1", Role: model.RoleOwner, JoinedAt: time.Now()}
 
 	msgService := service.NewMessageService(messageRepo, roomRepo, nil, nil)
 
@@ -131,6 +134,9 @@ func TestMessageService_SendMessage_ValidatesContent(t *testing.T) {
 func TestMessageService_SendMessage_SanitizesContent(t *testing.T) {
 	messageRepo := NewFakeMessageRepository()
 	roomRepo := NewFakeRoomRepository()
+
+	roomRepo.rooms["room-1"] = &model.Room{ID: "room-1", Type: model.RoomTypeGroup, CreatedBy: "user-1"}
+	roomRepo.members[key("room-1", "user-1")] = &model.RoomMember{RoomID: "room-1", UserID: "user-1", Role: model.RoleOwner, JoinedAt: time.Now()}
 
 	msgService := service.NewMessageService(messageRepo, roomRepo, nil, nil)
 	msg, err := msgService.SendMessage(context.Background(), service.SendMessageInput{
