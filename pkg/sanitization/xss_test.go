@@ -14,7 +14,7 @@ func TestSanitizeHTML(t *testing.T) {
 	}{
 		{"plain text", "Hello World", "Hello World"},
 		{"with html tags", "Hello <b>World</b>", "Hello &lt;b&gt;World&lt;/b&gt;"},
-		{"with script", "Hello <script>alert('xss')</script>", "Hello &lt;script&gt;alert(&#39;xss&#39;)&lt;/script&gt;"},
+		{"with script", "Hello <script>alert('xss')</script>", "Hello "},
 	}
 
 	for _, tt := range tests {

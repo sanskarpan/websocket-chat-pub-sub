@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/gin-gonic/gin"
+	"github.com/websocket-chat/internal/metrics"
 	"github.com/websocket-chat/internal/pubsub"
 )
 
@@ -24,13 +25,8 @@ func RateLimitMiddleware(ps pubsub.PubSub, actionKey string, limit int, window t
 
 		key := actionKey + ":" + identifier
 		allowed, err := ps.CheckRateLimit(c.Request.Context(), key, limit, window)
-		if err != nil {
-			// If Redis check fails, fail open to avoid service outage, but log error
-			c.Next()
-			return
-		}
-
-		if !allowed {
+		if err != nil || !allowed {
+			metrics.RateLimitedRequestsTotal.WithLabelValues(actionKey).Inc()
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code":        "RATE_LIMIT_EXCEEDED",
 				"message":     "Too many requests, please try again later",

@@ -2,31 +2,50 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
 	"github.com/gin-gonic/gin"
 	"github.com/websocket-chat/internal/cache"
 	"github.com/websocket-chat/internal/config"
+	"github.com/websocket-chat/internal/handlers"
 	"github.com/websocket-chat/internal/health"
 	"github.com/websocket-chat/internal/logging"
 	"github.com/websocket-chat/internal/metrics"
 	"github.com/websocket-chat/internal/middleware"
-	"github.com/websocket-chat/internal/model"
 	"github.com/websocket-chat/internal/pubsub"
 	"github.com/websocket-chat/internal/repository"
 	"github.com/websocket-chat/internal/server"
 	"github.com/websocket-chat/internal/service"
 	"github.com/websocket-chat/internal/tracing"
+	"github.com/websocket-chat/pkg/snowflake"
 )
 
 func main() {
 	cfg := config.Load()
-	logger := logging.NewLogger(cfg)
+	logHandle := logging.NewLogger(cfg)
+	logger := logHandle.Logger
+	defer func() {
+		if err := logHandle.Closer.Close(); err != nil {
+			logger.Error().Err(err).Msg("Failed to close log file")
+		}
+	}()
+
+	if nodeIDStr := os.Getenv("SNOWFLAKE_NODE_ID"); nodeIDStr != "" {
+		if nodeID, err := strconv.ParseInt(nodeIDStr, 10, 64); err == nil {
+			if err := snowflake.SetNodeID(nodeID); err != nil {
+				logger.Warn().Err(err).Msg("Invalid SNOWFLAKE_NODE_ID")
+			} else {
+				logger.Info().Int64("node_id", nodeID).Msg("Snowflake node ID set from environment")
+			}
+		}
+	}
 
 	if err := cfg.Validate(); err != nil {
 		logger.Fatal().Err(err).Msg("Invalid configuration")
@@ -64,8 +83,9 @@ func main() {
 	messageRepo := repository.NewMessageRepository(db)
 
 	authService := service.NewAuthService(cfg, userRepo)
+	authService.SetTokenInvalidator(ps)
 	userService := service.NewUserService(userRepo, redisCache)
-	roomService := service.NewRoomService(roomRepo, userRepo, redisCache)
+	roomService := service.NewRoomService(roomRepo, userRepo, redisCache, ps)
 	messageService := service.NewMessageService(messageRepo, roomRepo, ps, cfg)
 	presenceService := service.NewPresenceService(ps)
 
@@ -82,10 +102,11 @@ func main() {
 	router := gin.New()
 
 	allowedOrigins := []string{"http://localhost:3000", "http://localhost:8085", "http://127.0.0.1:3000", "http://127.0.0.1:8085"}
-	router.Use(gin.Recovery(), middleware.CORSMiddleware(allowedOrigins), middleware.RequestIDMiddleware())
+	router.Use(gin.Recovery(), middleware.CORSMiddleware(allowedOrigins), middleware.RequestIDMiddleware(), middleware.RequestLoggingMiddleware(cfg.App.Name))
 
 	healthChecker := health.NewChecker(db, ps)
-	setupRoutes(router, cfg, authService, roomService, messageService, ps, healthChecker)
+	h := handlers.New(cfg, authService, roomService, messageService, ps)
+	setupRoutes(router, cfg, authService, healthChecker, h, ps)
 
 	apiServer := &http.Server{
 		Addr:         fmt.Sprintf("%s:%d", cfg.Server.Host, cfg.Server.Port),
@@ -94,10 +115,19 @@ func main() {
 		WriteTimeout: cfg.Server.HTTP.WriteTimeout,
 		IdleTimeout:  cfg.Server.HTTP.IdleTimeout,
 	}
+	if cfg.Server.TLS.Enabled {
+		apiServer.TLSConfig = &tls.Config{MinVersion: tls.VersionTLS12}
+	}
 
 	go func() {
 		logger.Info().Str("addr", apiServer.Addr).Msg("Starting REST API")
-		if err := apiServer.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+		var err error
+		if cfg.Server.TLS.Enabled && cfg.Server.TLS.CertFile != "" && cfg.Server.TLS.KeyFile != "" {
+			err = apiServer.ListenAndServeTLS(cfg.Server.TLS.CertFile, cfg.Server.TLS.KeyFile)
+		} else {
+			err = apiServer.ListenAndServe()
+		}
+		if err != nil && err != http.ErrServerClosed {
 			logger.Error().Err(err).Msg("REST API error")
 		}
 	}()
@@ -138,10 +168,9 @@ func setupRoutes(
 	router *gin.Engine,
 	cfg *config.Config,
 	authService *service.AuthService,
-	roomService *service.RoomService,
-	messageService *service.MessageService,
-	ps pubsub.PubSub,
 	healthChecker *health.Checker,
+	h *handlers.Handlers,
+	ps pubsub.PubSub,
 ) {
 	router.GET("/healthz", healthChecker.LivenessHandler)
 	router.GET("/readyz", healthChecker.ReadinessHandler)
@@ -164,206 +193,27 @@ func setupRoutes(
 
 	api := router.Group("/api/v1")
 	{
-		authRateLimit := middleware.RateLimitMiddleware(ps, "auth", 10, time.Minute)
-
-		auth := api.Group("/auth")
-		auth.Use(authRateLimit)
-		{
-			auth.POST("/register", func(c *gin.Context) {
-				var input service.RegisterInput
-				if err := c.ShouldBindJSON(&input); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_INPUT", "message": "Invalid registration request payload"})
-					return
-				}
-
-				user, err := authService.Register(c.Request.Context(), input)
-				if err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": "REGISTRATION_FAILED", "message": err.Error()})
-					return
-				}
-
-				c.JSON(http.StatusCreated, gin.H{
-					"id":           user.ID,
-					"username":     user.Username,
-					"email":        user.Email,
-					"display_name": user.DisplayName,
-				})
-			})
-
-			auth.POST("/login", func(c *gin.Context) {
-				var input service.LoginInput
-				if err := c.ShouldBindJSON(&input); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_INPUT", "message": "Invalid login request payload"})
-					return
-				}
-
-				tokens, err := authService.Login(c.Request.Context(), input)
-				if err != nil {
-					c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "Invalid credentials"})
-					return
-				}
-
-				c.JSON(http.StatusOK, gin.H{
-					"access_token":  tokens.AccessToken,
-					"refresh_token": tokens.RefreshToken,
-					"token_type":    "Bearer",
-					"expires_in":    int(cfg.Auth.JWT.AccessTokenTTL.Seconds()),
-				})
-			})
-
-			auth.POST("/refresh", func(c *gin.Context) {
-				var input struct {
-					RefreshToken string `json:"refresh_token" binding:"required"`
-				}
-				if err := c.ShouldBindJSON(&input); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_INPUT", "message": "Invalid refresh payload"})
-					return
-				}
-
-				tokens, err := authService.RefreshToken(c.Request.Context(), input.RefreshToken)
-				if err != nil {
-					c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "Invalid refresh token"})
-					return
-				}
-
-				c.JSON(http.StatusOK, gin.H{
-					"access_token":  tokens.AccessToken,
-					"refresh_token": tokens.RefreshToken,
-					"token_type":    "Bearer",
-				})
-			})
+		authRateLimit := 10
+		if os.Getenv("AUTH_RATE_LIMIT_DISABLE") == "1" {
+			authRateLimit = 0
 		}
-
-		authMiddleware := func(c *gin.Context) {
-			token := c.GetHeader("Authorization")
-			if token == "" {
-				c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "Authorization header required"})
-				c.Abort()
-				return
-			}
-
-			if len(token) > 7 && token[:7] == "Bearer " {
-				token = token[7:]
-			}
-
-			user, err := authService.ValidateToken(c.Request.Context(), token)
-			if err != nil {
-				c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "Invalid or expired token"})
-				c.Abort()
-				return
-			}
-
-			c.Set("user_id", user.ID)
-			c.Set("user", user)
-			c.Next()
+		auth := api.Group("/auth")
+		auth.Use(middleware.RateLimitMiddleware(ps, "auth", authRateLimit, time.Minute))
+		{
+			auth.POST("/register", h.Register)
+			auth.POST("/login", h.Login)
+			auth.POST("/refresh", h.Refresh)
 		}
 
 		rooms := api.Group("/rooms")
-		rooms.Use(authMiddleware)
+		rooms.Use(handlers.AuthMiddleware(authService))
 		{
-			rooms.GET("", func(c *gin.Context) {
-				val, exists := c.Get("user_id")
-				if !exists {
-					c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "User not authenticated"})
-					return
-				}
-				userID, ok := val.(string)
-				if !ok {
-					c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": "Invalid context state"})
-					return
-				}
-				rooms, err := roomService.GetUserRooms(c.Request.Context(), userID)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": "Failed to retrieve user rooms"})
-					return
-				}
-				c.JSON(http.StatusOK, rooms)
-			})
-
-			rooms.POST("", func(c *gin.Context) {
-				var input struct {
-					Name        string `json:"name" binding:"required"`
-					Type        string `json:"type" binding:"required"`
-					Description string `json:"description"`
-				}
-				if err := c.ShouldBindJSON(&input); err != nil {
-					c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_INPUT", "message": "Invalid room payload"})
-					return
-				}
-
-				val, exists := c.Get("user_id")
-				if !exists {
-					c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "User not authenticated"})
-					return
-				}
-				userID, _ := val.(string)
-
-				room, err := roomService.Create(c.Request.Context(), service.CreateRoomInput{
-					Name:        input.Name,
-					Type:        model.RoomType(input.Type),
-					Description: input.Description,
-					CreatedBy:   userID,
-				})
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"code": "CREATE_ROOM_FAILED", "message": "Failed to create room"})
-					return
-				}
-
-				c.JSON(http.StatusCreated, room)
-			})
-
-			rooms.GET("/:id", func(c *gin.Context) {
-				roomID := c.Param("id")
-				room, err := roomService.GetByID(c.Request.Context(), roomID)
-				if err != nil {
-					c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": "Room not found"})
-					return
-				}
-				c.JSON(http.StatusOK, room)
-			})
-
-			rooms.GET("/:id/messages", func(c *gin.Context) {
-				roomID := c.Param("id")
-				limit := 50
-				messages, err := messageService.GetRoomMessages(c.Request.Context(), roomID, limit, nil)
-				if err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"code": "INTERNAL_ERROR", "message": "Failed to retrieve room messages"})
-					return
-				}
-				c.JSON(http.StatusOK, messages)
-			})
-
-			rooms.POST("/:id/join", func(c *gin.Context) {
-				roomID := c.Param("id")
-				val, exists := c.Get("user_id")
-				if !exists {
-					c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "User not authenticated"})
-					return
-				}
-				userID, _ := val.(string)
-
-				if err := roomService.JoinRoom(c.Request.Context(), roomID, userID, ps); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"code": "JOIN_FAILED", "message": "Failed to join room"})
-					return
-				}
-				c.JSON(http.StatusOK, gin.H{"status": "joined"})
-			})
-
-			rooms.POST("/:id/leave", func(c *gin.Context) {
-				roomID := c.Param("id")
-				val, exists := c.Get("user_id")
-				if !exists {
-					c.JSON(http.StatusUnauthorized, gin.H{"code": "UNAUTHORIZED", "message": "User not authenticated"})
-					return
-				}
-				userID, _ := val.(string)
-
-				if err := roomService.LeaveRoom(c.Request.Context(), roomID, userID, ps); err != nil {
-					c.JSON(http.StatusInternalServerError, gin.H{"code": "LEAVE_FAILED", "message": "Failed to leave room"})
-					return
-				}
-				c.JSON(http.StatusOK, gin.H{"status": "left"})
-			})
+			rooms.GET("", h.ListRooms)
+			rooms.POST("", h.CreateRoom)
+			rooms.GET("/:id", h.GetRoom)
+			rooms.GET("/:id/messages", h.GetRoomMessages)
+			rooms.POST("/:id/join", h.JoinRoom)
+			rooms.POST("/:id/leave", h.LeaveRoom)
 		}
 	}
 }
