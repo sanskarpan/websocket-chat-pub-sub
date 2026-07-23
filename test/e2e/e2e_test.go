@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"os"
 	"sync"
 	"testing"
 	"time"
@@ -27,6 +28,13 @@ const (
 var (
 	apiCtx = &apiContext{retryDelay: 2 * time.Second}
 )
+
+func TestMain(m *testing.M) {
+	if os.Getenv("E2E_DISABLE_RATELIMIT") != "1" {
+		fmt.Println("E2E: rate limiting active; set E2E_DISABLE_RATELIMIT=1 to disable")
+	}
+	os.Exit(m.Run())
+}
 
 type apiContext struct {
 	retryDelay time.Duration
@@ -80,6 +88,17 @@ type ackData struct {
 type newMessageData struct {
 	RoomID  string      `json:"room_id"`
 	Message interface{} `json:"message"`
+}
+
+type wsWriter struct {
+	mu   sync.Mutex
+	conn *websocket.Conn
+}
+
+func (w *wsWriter) WriteMessage(messageType int, data []byte) error {
+	w.mu.Lock()
+	defer w.mu.Unlock()
+	return w.conn.WriteMessage(messageType, data)
 }
 
 func randomString(n int) string {
@@ -582,12 +601,15 @@ func TestE2E_ConcurrentMessages(t *testing.T) {
 
 	time.Sleep(500 * time.Millisecond)
 
+	var writeMu sync.Mutex
 	for i := 0; i < sendCount; i++ {
 		wg.Add(1)
 		go func(idx int) {
 			defer wg.Done()
+			writeMu.Lock()
 			content := fmt.Sprintf("conc_msg_%d_%s", idx, randomString(4))
 			sendWSMessage(t, conn1, roomID, content)
+			writeMu.Unlock()
 		}(i)
 	}
 
@@ -755,10 +777,11 @@ func TestE2E_WSSendToUnsubscribedRoom(t *testing.T) {
 	content := "msg_without_subscribe_" + randomString(4)
 	sendWSMessage(t, conn, roomID, content)
 
+	foundError := false
 	foundAck := false
 	deadline := time.Now().Add(5 * time.Second)
-	for time.Now().Before(deadline) {
-		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+	for time.Now().Before(deadline) && !foundError {
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
 		_, raw, err := conn.ReadMessage()
 		if err != nil {
 			break
@@ -770,11 +793,14 @@ func TestE2E_WSSendToUnsubscribedRoom(t *testing.T) {
 			json.Unmarshal(msg.Data, &ack)
 			if ack.Status == "delivered" {
 				foundAck = true
-				t.Log("Message was acknowledged even without subscribing to room")
 			}
 		}
+		if msg.Type == "error" {
+			foundError = true
+		}
 	}
-	t.Logf("Message to unsubscribed room got ack=%v (if true, message was delivered but subscriber didn't receive broadcast)", foundAck)
+	assert.False(t, foundAck, "Should NOT receive ack=delivered when not subscribed to room")
+	assert.True(t, foundError, "Should receive error when not subscribed to room")
 }
 
 func TestE2E_WSSubscribeNonExistentRoom(t *testing.T) {
@@ -795,7 +821,7 @@ func TestE2E_WSSubscribeNonExistentRoom(t *testing.T) {
 		"id":   "sub-nonexistent",
 		"type": "subscribe",
 		"data": map[string]interface{}{
-			"room_ids": []string{"nonexistent-room-id"},
+			"room_ids": []string{"nonexistent-room-id-12345"},
 		},
 	}
 	data, _ := json.Marshal(subMsg)
@@ -803,15 +829,84 @@ func TestE2E_WSSubscribeNonExistentRoom(t *testing.T) {
 	err := conn.WriteMessage(websocket.TextMessage, data)
 	require.NoError(t, err)
 
-	conn.SetReadDeadline(time.Now().Add(5 * time.Second))
-	_, raw, err := conn.ReadMessage()
-	if err != nil {
-		t.Logf("No ack received for subscribing to non-existent room (may be expected)")
-		return
+	foundAck := false
+	notSubscribed := false
+	deadline := time.Now().Add(5 * time.Second)
+	for time.Now().Before(deadline) && !foundAck {
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var msg wsMessage
+		json.Unmarshal(raw, &msg)
+		if msg.Type == "ack" {
+			var ack ackData
+			json.Unmarshal(msg.Data, &ack)
+			if ack.Status == "subscribed" {
+				foundAck = true
+			}
+		if ack.Status == "not_subscribed" {
+			notSubscribed = true
+			break
+		}
+		}
 	}
-	var msg wsMessage
-	json.Unmarshal(raw, &msg)
-	t.Logf("Response to non-existent room subscribe: type=%s", msg.Type)
+	assert.False(t, foundAck, "Should NOT receive ack=subscribed for non-existent room")
+	assert.True(t, notSubscribed, "Should receive ack=not_subscribed for non-existent room")
+}
+
+func sendWSAction(t *testing.T, conn *websocket.Conn, actionType string, data map[string]interface{}) string {
+	msgID := fmt.Sprintf("%s-%d", actionType, time.Now().UnixNano())
+	msg := map[string]interface{}{
+		"id":   msgID,
+		"type": actionType,
+		"data": data,
+	}
+	msgBytes, _ := json.Marshal(msg)
+	conn.SetWriteDeadline(time.Now().Add(5 * time.Second))
+	err := conn.WriteMessage(websocket.TextMessage, msgBytes)
+	require.NoError(t, err)
+	return msgID
+}
+
+func waitForAck(t *testing.T, conn *websocket.Conn, clientMsgID, expectedStatus string) {
+	deadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var msg wsMessage
+		json.Unmarshal(raw, &msg)
+		if msg.Type == "ack" {
+			var ack ackData
+			json.Unmarshal(msg.Data, &ack)
+			if ack.ClientMsgID == clientMsgID {
+				require.Equal(t, expectedStatus, ack.Status)
+				return
+			}
+		}
+	}
+	t.Fatalf("Did not receive ack for msg %s with status %s", clientMsgID, expectedStatus)
+}
+
+func waitForNoError(t *testing.T, conn *websocket.Conn) {
+	deadline := time.Now().Add(3 * time.Second)
+	for time.Now().Before(deadline) {
+		conn.SetReadDeadline(time.Now().Add(1 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			return
+		}
+		var msg wsMessage
+		json.Unmarshal(raw, &msg)
+		if msg.Type == "error" {
+			t.Errorf("Unexpected error received: %s", string(raw))
+			return
+		}
+	}
 }
 
 func TestE2E_DuplicateWebSocketConnections(t *testing.T) {
@@ -874,4 +969,251 @@ func TestE2E_DuplicateWebSocketConnections(t *testing.T) {
 
 	assert.True(t, received1, "First connection should receive message")
 	assert.True(t, received2, "Second connection should receive broadcast")
+}
+
+func TestE2E_Reaction(t *testing.T) {
+	suffix := randomString(8)
+	username := "react_" + suffix
+	email := "react_" + suffix + "@example.com"
+	password := "password123"
+
+	_, status := registerUser(t, username, email, password)
+	require.Equal(t, http.StatusCreated, status)
+	tokens, status := loginUser(t, email, password)
+	require.Equal(t, http.StatusOK, status)
+	roomID, status := createRoom(t, tokens.AccessToken, username+"_room", "group", "")
+	require.Equal(t, http.StatusCreated, status)
+
+	conn := connectWS(t, tokens.AccessToken)
+	defer conn.Close()
+	subscribeToRoom(t, conn, roomID)
+
+	content := "react_test_" + randomString(4)
+	sendWSMessage(t, conn, roomID, content)
+
+	messageDeadline := time.Now().Add(10 * time.Second)
+	var serverMsgID string
+	for time.Now().Before(messageDeadline) && serverMsgID == "" {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var msg wsMessage
+		json.Unmarshal(raw, &msg)
+		if msg.Type == "ack" {
+			var ack ackData
+			json.Unmarshal(msg.Data, &ack)
+			if ack.Status == "delivered" && ack.ServerMsgID != "" {
+				serverMsgID = ack.ServerMsgID
+			}
+		}
+	}
+	require.NotEmpty(t, serverMsgID, "Should receive ack with server message ID")
+
+	addID := sendWSAction(t, conn, "reaction", map[string]interface{}{
+		"message_id": serverMsgID,
+		"emoji":      "👍",
+		"action":     "add",
+	})
+	waitForAck(t, conn, addID, "reaction_add")
+
+	removeID := sendWSAction(t, conn, "reaction", map[string]interface{}{
+		"message_id": serverMsgID,
+		"emoji":      "👍",
+		"action":     "remove",
+	})
+	waitForAck(t, conn, removeID, "reaction_remove")
+}
+
+func TestE2E_EditMessage(t *testing.T) {
+	suffix := randomString(8)
+	username := "edit_" + suffix
+	email := "edit_" + suffix + "@example.com"
+	password := "password123"
+
+	_, status := registerUser(t, username, email, password)
+	require.Equal(t, http.StatusCreated, status)
+	tokens, status := loginUser(t, email, password)
+	require.Equal(t, http.StatusOK, status)
+	roomID, status := createRoom(t, tokens.AccessToken, username+"_room", "group", "")
+	require.Equal(t, http.StatusCreated, status)
+
+	conn := connectWS(t, tokens.AccessToken)
+	defer conn.Close()
+	subscribeToRoom(t, conn, roomID)
+
+	content := "edit_test_" + randomString(4)
+	sendWSMessage(t, conn, roomID, content)
+
+	var serverMsgID string
+	messageDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(messageDeadline) && serverMsgID == "" {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var msg wsMessage
+		json.Unmarshal(raw, &msg)
+		if msg.Type == "ack" {
+			var ack ackData
+			json.Unmarshal(msg.Data, &ack)
+			if ack.Status == "delivered" && ack.ServerMsgID != "" {
+				serverMsgID = ack.ServerMsgID
+			}
+		}
+	}
+	require.NotEmpty(t, serverMsgID, "Should receive ack with server message ID")
+
+	editID := sendWSAction(t, conn, "edit", map[string]interface{}{
+		"message_id": serverMsgID,
+		"content":    "edited content " + randomString(4),
+	})
+	waitForAck(t, conn, editID, "edited")
+}
+
+func TestE2E_DeleteMessage(t *testing.T) {
+	suffix := randomString(8)
+	username := "del_" + suffix
+	email := "del_" + suffix + "@example.com"
+	password := "password123"
+
+	_, status := registerUser(t, username, email, password)
+	require.Equal(t, http.StatusCreated, status)
+	tokens, status := loginUser(t, email, password)
+	require.Equal(t, http.StatusOK, status)
+	roomID, status := createRoom(t, tokens.AccessToken, username+"_room", "group", "")
+	require.Equal(t, http.StatusCreated, status)
+
+	conn := connectWS(t, tokens.AccessToken)
+	defer conn.Close()
+	subscribeToRoom(t, conn, roomID)
+
+	content := "del_test_" + randomString(4)
+	sendWSMessage(t, conn, roomID, content)
+
+	var serverMsgID string
+	messageDeadline := time.Now().Add(10 * time.Second)
+	for time.Now().Before(messageDeadline) && serverMsgID == "" {
+		conn.SetReadDeadline(time.Now().Add(5 * time.Second))
+		_, raw, err := conn.ReadMessage()
+		if err != nil {
+			break
+		}
+		var msg wsMessage
+		json.Unmarshal(raw, &msg)
+		if msg.Type == "ack" {
+			var ack ackData
+			json.Unmarshal(msg.Data, &ack)
+			if ack.Status == "delivered" && ack.ServerMsgID != "" {
+				serverMsgID = ack.ServerMsgID
+			}
+		}
+	}
+	require.NotEmpty(t, serverMsgID, "Should receive ack with server message ID")
+
+	deleteID := sendWSAction(t, conn, "delete", map[string]interface{}{
+		"message_id": serverMsgID,
+	})
+	waitForAck(t, conn, deleteID, "deleted")
+}
+
+func TestE2E_TypingIndicator(t *testing.T) {
+	suffix := randomString(8)
+	username := "type_" + suffix
+	email := "type_" + suffix + "@example.com"
+	password := "password123"
+
+	_, status := registerUser(t, username, email, password)
+	require.Equal(t, http.StatusCreated, status)
+	tokens, status := loginUser(t, email, password)
+	require.Equal(t, http.StatusOK, status)
+	roomID, status := createRoom(t, tokens.AccessToken, username+"_room", "group", "")
+	require.Equal(t, http.StatusCreated, status)
+
+	conn := connectWS(t, tokens.AccessToken)
+	defer conn.Close()
+	subscribeToRoom(t, conn, roomID)
+
+	sendWSAction(t, conn, "typing", map[string]interface{}{
+		"room_id": roomID,
+	})
+
+	waitForNoError(t, conn)
+}
+
+func TestE2E_Presence(t *testing.T) {
+	suffix := randomString(8)
+	username := "pres_" + suffix
+	email := "pres_" + suffix + "@example.com"
+	password := "password123"
+
+	_, status := registerUser(t, username, email, password)
+	require.Equal(t, http.StatusCreated, status)
+	tokens, status := loginUser(t, email, password)
+	require.Equal(t, http.StatusOK, status)
+
+	conn := connectWS(t, tokens.AccessToken)
+	defer conn.Close()
+
+	sendWSAction(t, conn, "presence", map[string]interface{}{
+		"status": "online",
+	})
+
+	waitForNoError(t, conn)
+
+	conn.Close()
+
+	conn2 := connectWS(t, tokens.AccessToken)
+	defer conn2.Close()
+
+	sendWSAction(t, conn2, "presence", map[string]interface{}{
+		"status": "online",
+	})
+
+	waitForNoError(t, conn2)
+}
+
+func TestE2E_RateLimitExceeded(t *testing.T) {
+	if os.Getenv("E2E_DISABLE_RATELIMIT") != "" {
+		t.Skip("Rate limiting disabled via E2E_DISABLE_RATELIMIT")
+	}
+
+	suffix := randomString(4)
+	count := 12
+
+	client := &http.Client{Timeout: 5 * time.Second}
+
+	for i := 0; i < count; i++ {
+		email := fmt.Sprintf("ratelimit_%s_%d@example.com", suffix, i)
+		body := loginRequest{Email: email, Password: "irrelevant"}
+		data, _ := json.Marshal(body)
+
+		req, err := http.NewRequest("POST", apiV1+"/auth/login", bytes.NewReader(data))
+		if err != nil {
+			t.Fatal(err)
+		}
+		req.Header.Set("Content-Type", contentType)
+
+		resp, err := client.Do(req)
+		if err != nil {
+			t.Fatal(err)
+		}
+
+		if i >= 10 {
+			if resp.StatusCode == http.StatusTooManyRequests {
+				t.Logf("Correctly rate limited on attempt %d", i+1)
+				resp.Body.Close()
+				return
+			}
+		}
+
+		if i == count-1 {
+			resp.Body.Close()
+			t.Errorf("Expected 429 Too Many Requests by attempt %d, but got %d", count, resp.StatusCode)
+		} else {
+			resp.Body.Close()
+		}
+	}
 }
