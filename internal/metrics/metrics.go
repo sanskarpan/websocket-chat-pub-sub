@@ -31,24 +31,6 @@ var (
 		Help: "Total number of WebSocket connection errors",
 	}, []string{"error_type"})
 
-	HTTPRequestDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "http_request_duration_seconds",
-		Help:    "HTTP request duration in seconds",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"method", "path", "status"})
-
-	DBQueryDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "db_query_duration_seconds",
-		Help:    "Database query duration in seconds",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"query_type"})
-
-	RedisOperationDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
-		Name:    "redis_operation_duration_seconds",
-		Help:    "Redis operation duration in seconds",
-		Buckets: prometheus.DefBuckets,
-	}, []string{"operation"})
-
 	RoomSubscriptionsActive = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "room_subscriptions_active",
 		Help: "Number of active room subscriptions",
@@ -63,6 +45,20 @@ var (
 		Name: "rate_limited_requests_total",
 		Help: "Total number of rate-limited requests",
 	}, []string{"key"})
+)
+
+var (
+	DBQueryDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "db_query_duration_seconds",
+		Help:    "Duration of database queries",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"query_type"})
+
+	RedisOperationDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name:    "redis_operation_duration_seconds",
+		Help:    "Duration of Redis operations",
+		Buckets: prometheus.DefBuckets,
+	}, []string{"operation"})
 )
 
 var (
@@ -86,12 +82,11 @@ func (m *MetricsServer) Start() error {
 			MessagesSentTotal,
 			MessagesReceivedTotal,
 			ConnectionErrorsTotal,
-			HTTPRequestDuration,
-			DBQueryDuration,
-			RedisOperationDuration,
 			RoomSubscriptionsActive,
 			AuthAttemptsTotal,
 			RateLimitedRequestsTotal,
+			DBQueryDuration,
+			RedisOperationDuration,
 		}
 
 		for _, c := range collectors {

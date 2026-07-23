@@ -1,19 +1,23 @@
 #!/bin/bash
 set -e
 
-echo "Generating JWT keys for production..."
+echo "Generating RSA 2048-bit JWT keys..."
 
-mkdir -p keys
+KEY_DIR="configs"
 
-if [ ! -f keys/jwt-private.pem ]; then
-    openssl genrsa -out keys/jwt-private.pem 2048
-    echo "Generated private key"
+mkdir -p "$KEY_DIR"
+
+if [ ! -f "$KEY_DIR/jwt-private.pem" ]; then
+    openssl genrsa -out "$KEY_DIR/jwt-private.pem" 2048
+    echo "Generated private key: $KEY_DIR/jwt-private.pem"
 fi
 
-if [ ! -f keys/jwt-public.pem ]; then
-    openssl rsa -in keys/jwt-private.pem -pubout -out keys/jwt-public.pem
-    echo "Generated public key"
+if [ ! -f "$KEY_DIR/jwt-public.pem" ]; then
+    openssl rsa -in "$KEY_DIR/jwt-private.pem" -pubout -out "$KEY_DIR/jwt-public.pem"
+    echo "Generated public key: $KEY_DIR/jwt-public.pem"
 fi
+
+chmod 600 "$KEY_DIR/jwt-private.pem"
 
 echo "JWT keys generated successfully"
-ls -la keys/
+ls -la "$KEY_DIR"/jwt-*.pem
