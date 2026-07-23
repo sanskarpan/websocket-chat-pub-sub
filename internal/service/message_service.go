@@ -5,15 +5,44 @@ import (
 	"encoding/json"
 	"errors"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/websocket-chat/internal/config"
 	"github.com/websocket-chat/internal/model"
 	"github.com/websocket-chat/internal/pubsub"
 	"github.com/websocket-chat/internal/repository"
+	"github.com/websocket-chat/internal/tracing"
 	"github.com/websocket-chat/pkg/sanitization"
 	"github.com/websocket-chat/pkg/validator"
 )
+
+type dedupEntry struct {
+	msgID     string
+	timestamp time.Time
+}
+
+var (
+	clientDedup   sync.Map
+	dedupTTL      = 5 * time.Minute
+	dedupCleanup  = 10 * time.Minute
+)
+
+func init() {
+	go func() {
+		for {
+			time.Sleep(dedupCleanup)
+			now := time.Now()
+			clientDedup.Range(func(key, value interface{}) bool {
+				entry := value.(dedupEntry)
+				if now.Sub(entry.timestamp) > dedupTTL {
+					clientDedup.Delete(key)
+				}
+				return true
+			})
+		}
+	}()
+}
 
 type MessageService struct {
 	messageRepo repository.IMessageRepository
@@ -41,6 +70,15 @@ type SendMessageInput struct {
 }
 
 func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput) (*model.Message, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.send")
+	defer spanEnd()
+
+	if input.ClientID != "" {
+		if existing, err := s.checkDedup(ctx, input.UserID, input.ClientID); err == nil {
+			return existing, nil
+		}
+	}
+
 	content := sanitization.SanitizeMessage(input.Content)
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -48,6 +86,18 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 	}
 	if err := validator.ValidateMessageContent(content); err != nil {
 		return nil, err
+	}
+
+	if _, err := s.roomRepo.GetByID(ctx, input.RoomID); err != nil {
+		return nil, errors.New("room not found")
+	}
+
+	isMember, err := s.roomRepo.IsMember(ctx, input.RoomID, input.UserID)
+	if err != nil {
+		return nil, err
+	}
+	if !isMember {
+		return nil, errors.New("unauthorized: not a member of this room")
 	}
 
 	msg := &model.Message{
@@ -62,6 +112,10 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 		return nil, err
 	}
 
+	if input.ClientID != "" {
+		markDedup(input.UserID, input.ClientID, msg.ID)
+	}
+
 	if s.pubsub != nil {
 		data, _ := json.Marshal(map[string]interface{}{
 			"room_id": msg.RoomID,
@@ -73,15 +127,39 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 	return msg, nil
 }
 
+func (s *MessageService) checkDedup(ctx context.Context, userID, clientID string) (*model.Message, error) {
+	key := userID + ":" + clientID
+	if v, ok := clientDedup.Load(key); ok {
+		entry := v.(dedupEntry)
+		existing, err := s.messageRepo.GetByID(ctx, entry.msgID)
+		if err == nil {
+			return existing, nil
+		}
+		clientDedup.Delete(key)
+	}
+	return nil, errors.New("not a duplicate")
+}
+
+func markDedup(userID, clientID, msgID string) {
+	key := userID + ":" + clientID
+	clientDedup.Store(key, dedupEntry{msgID: msgID, timestamp: time.Now()})
+}
+
 func (s *MessageService) GetMessage(ctx context.Context, id string) (*model.Message, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.get")
+	defer spanEnd()
 	return s.messageRepo.GetByID(ctx, id)
 }
 
 func (s *MessageService) GetRoomMessages(ctx context.Context, roomID string, limit int, before *time.Time) ([]*model.Message, error) {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.get_room")
+	defer spanEnd()
 	return s.messageRepo.GetByRoom(ctx, roomID, limit, before)
 }
 
 func (s *MessageService) EditMessage(ctx context.Context, msgID, requesterID, content string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.edit")
+	defer spanEnd()
 	content = sanitization.SanitizeMessage(content)
 	content = strings.TrimSpace(content)
 	if content == "" {
@@ -127,6 +205,8 @@ func (s *MessageService) EditMessage(ctx context.Context, msgID, requesterID, co
 }
 
 func (s *MessageService) DeleteMessage(ctx context.Context, msgID, requesterID string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.delete")
+	defer spanEnd()
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
@@ -172,6 +252,8 @@ func (s *MessageService) GetThread(ctx context.Context, parentID string, limit i
 }
 
 func (s *MessageService) AddReaction(ctx context.Context, msgID, emoji, userID string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.add_reaction")
+	defer spanEnd()
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
@@ -198,6 +280,8 @@ func (s *MessageService) AddReaction(ctx context.Context, msgID, emoji, userID s
 }
 
 func (s *MessageService) RemoveReaction(ctx context.Context, msgID, emoji, userID string) error {
+	ctx, spanEnd := tracing.StartSpan(ctx, "message.remove_reaction")
+	defer spanEnd()
 	msg, err := s.messageRepo.GetByID(ctx, msgID)
 	if err != nil {
 		return err
