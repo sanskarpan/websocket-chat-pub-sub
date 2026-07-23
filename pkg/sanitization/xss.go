@@ -15,9 +15,9 @@ var (
 )
 
 func SanitizeHTML(input string) string {
-	input = html.EscapeString(input)
 	input = scriptTagRegex.ReplaceAllString(input, "")
 	input = jsEventRegex.ReplaceAllString(input, "")
+	input = html.EscapeString(input)
 	return input
 }
 
@@ -27,9 +27,9 @@ func StripHTML(input string) string {
 
 func SanitizeMessage(input string) string {
 	input = strings.TrimSpace(input)
-	input = html.EscapeString(input)
 	input = scriptTagRegex.ReplaceAllString(input, "")
 	input = jsEventRegex.ReplaceAllString(input, "")
+	input = html.EscapeString(input)
 	input = strings.ReplaceAll(input, "\x00", "")
 	return input
 }
