@@ -121,7 +121,7 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 			"room_id": msg.RoomID,
 			"message": msg,
 		})
-		s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
+		_ = s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
 	}
 
 	return msg, nil
@@ -198,7 +198,7 @@ func (s *MessageService) EditMessage(ctx context.Context, msgID, requesterID, co
 			"message": msg,
 			"action":  "edited",
 		})
-		s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
+		_ = s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
 	}
 
 	return nil
@@ -241,7 +241,7 @@ func (s *MessageService) DeleteMessage(ctx context.Context, msgID, requesterID s
 			"message_id": msgID,
 			"action":     "deleted",
 		})
-		s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
+		_ = s.pubsub.Publish(ctx, "ws:room:"+msg.RoomID, data)
 	}
 
 	return nil

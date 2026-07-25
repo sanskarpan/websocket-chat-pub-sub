@@ -16,9 +16,8 @@ var _ repository.IRoomRepository = (*FakeRoomRepository)(nil)
 var _ repository.IMessageRepository = (*FakeMessageRepository)(nil)
 
 type FakeUserRepository struct {
-	mu      sync.RWMutex
-	users   map[string]*model.User
-	failGet bool
+	mu    sync.RWMutex
+	users map[string]*model.User
 }
 
 func NewFakeUserRepository() *FakeUserRepository {
@@ -99,10 +98,9 @@ func (r *FakeUserRepository) Search(ctx context.Context, query string, limit int
 }
 
 type FakeRoomRepository struct {
-	mu        sync.RWMutex
-	rooms     map[string]*model.Room
+	mu       sync.RWMutex
+	rooms    map[string]*model.Room
 	members  map[string]*model.RoomMember
-	failGet  bool
 }
 
 func NewFakeRoomRepository() *FakeRoomRepository {

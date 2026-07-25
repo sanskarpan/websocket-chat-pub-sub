@@ -9,7 +9,6 @@ import (
 var (
 	htmlTagRegex   = regexp.MustCompile(`<[^>]*>`)
 	urlRegex       = regexp.MustCompile(`https?://[^\s]+`)
-	emailRegex     = regexp.MustCompile(`[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}`)
 	scriptTagRegex = regexp.MustCompile(`(?i)<script[^>]*>.*?</script>`)
 	jsEventRegex   = regexp.MustCompile(`(?i)\bon\w+\s*=`)
 )

@@ -143,7 +143,7 @@ func (s *Server) subscribeToRoomMessages() {
 		for {
 			select {
 			case <-s.ctx.Done():
-				sub.Close()
+				_ = sub.Close()
 				return
 			case msg, ok := <-ch:
 				if !ok {
@@ -164,12 +164,13 @@ func (s *Server) subscribeToRoomMessages() {
 						Timestamp int64  `json:"timestamp"`
 					}
 					if err := json.Unmarshal([]byte(msg.Payload), &eventData); err == nil {
-						if eventData.Action == "joined" {
+						switch eventData.Action {
+						case "joined":
 							serverMsg, _ = protocol.NewServerMessage(protocol.ServerMsgMemberJoined, map[string]interface{}{
 								"room_id": roomID,
 								"user_id": eventData.UserID,
 							})
-						} else if eventData.Action == "left" {
+						case "left":
 							serverMsg, _ = protocol.NewServerMessage(protocol.ServerMsgMemberLeft, map[string]interface{}{
 								"room_id": roomID,
 								"user_id": eventData.UserID,
@@ -207,7 +208,7 @@ func (s *Server) subscribeToRoomMessages() {
 				}
 			}
 		}
-		sub.Close()
+		_ = sub.Close()
 	}
 }
 
@@ -260,7 +261,7 @@ func (s *Server) subscribeToPresence() {
 		for {
 			select {
 			case <-s.ctx.Done():
-				sub.Close()
+				_ = sub.Close()
 				return
 			case msg, ok := <-ch:
 				if !ok {
@@ -311,7 +312,7 @@ var data struct {
 			}
 		}
 	}
-	sub.Close()
+	_ = sub.Close()
 }
 }
 
@@ -737,16 +738,16 @@ func (c *Client) ReadPump() {
 		case c.hub.unregister <- c:
 		default:
 		}
-		c.conn.Close()
+		_ = c.conn.Close()
 		if c.ipCounter != nil {
 			c.ipCounter.Add(-1)
 		}
 	}()
 
 	c.conn.SetReadLimit(c.cfg.Server.Websocket.MaxMessageSize)
-	c.conn.SetReadDeadline(time.Now().Add(c.cfg.Server.Websocket.PongTimeout))
+	_ = c.conn.SetReadDeadline(time.Now().Add(c.cfg.Server.Websocket.PongTimeout))
 	c.conn.SetPongHandler(func(string) error {
-		c.conn.SetReadDeadline(time.Now().Add(c.cfg.Server.Websocket.PongTimeout))
+		_ = c.conn.SetReadDeadline(time.Now().Add(c.cfg.Server.Websocket.PongTimeout))
 		return nil
 	})
 
@@ -769,7 +770,7 @@ func (c *Client) WritePump() {
 	ticker := time.NewTicker(c.cfg.Server.Websocket.PingInterval)
 	defer func() {
 		ticker.Stop()
-		c.conn.Close()
+		_ = c.conn.Close()
 	}()
 
 	for {
@@ -782,19 +783,19 @@ func (c *Client) WritePump() {
 				return
 			}
 
-			c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Server.Websocket.WriteTimeout))
+			_ = c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Server.Websocket.WriteTimeout))
 			w, err := c.conn.NextWriter(websocket.TextMessage)
 			if err != nil {
 				return
 			}
-			w.Write(message)
+			_, _ = w.Write(message)
 
 			if err := w.Close(); err != nil {
 				return
 			}
 
 		case <-ticker.C:
-			c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Server.Websocket.WriteTimeout))
+			_ = c.conn.SetWriteDeadline(time.Now().Add(c.cfg.Server.Websocket.WriteTimeout))
 			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
 				return
 			}

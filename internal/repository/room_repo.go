@@ -46,7 +46,7 @@ func (r *RoomRepository) CreateRoomWithOwner(ctx context.Context, room *model.Ro
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	room.ID = uuid.New().String()
 	room.CreatedAt = time.Now()
@@ -95,7 +95,7 @@ func (r *RoomRepository) GetByID(ctx context.Context, id string) (*model.Room, e
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal(settings, &room.Settings)
+	_ = json.Unmarshal(settings, &room.Settings)
 	return &room, nil
 }
 
@@ -150,7 +150,7 @@ func (r *RoomRepository) GetUserRooms(ctx context.Context, userID string) ([]*mo
 		if err != nil {
 			return nil, err
 		}
-		json.Unmarshal(settings, &room.Settings)
+		_ = json.Unmarshal(settings, &room.Settings)
 		rooms = append(rooms, &room)
 	}
 	if err := rows.Err(); err != nil {
@@ -179,7 +179,7 @@ func (r *RoomRepository) JoinRoomTx(ctx context.Context, member *model.RoomMembe
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	memberQuery := `
 		INSERT INTO room_members (room_id, user_id, role, joined_at, last_read_at, notifications)
@@ -212,7 +212,7 @@ func (r *RoomRepository) LeaveRoomTx(ctx context.Context, roomID, userID string)
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	if _, err := tx.Exec(ctx, `UPDATE room_members SET left_at = $3 WHERE room_id = $1 AND user_id = $2`, roomID, userID, time.Now()); err != nil {
 		return err
@@ -256,7 +256,7 @@ func (r *RoomRepository) GetMembers(ctx context.Context, roomID string) ([]*mode
 		if err != nil {
 			return nil, err
 		}
-		json.Unmarshal(notif, &member.Notifications)
+		_ = json.Unmarshal(notif, &member.Notifications)
 		members = append(members, &member)
 	}
 	if err := rows.Err(); err != nil {
@@ -288,7 +288,7 @@ func (r *RoomRepository) GetMember(ctx context.Context, roomID, userID string) (
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal(notif, &member.Notifications)
+	_ = json.Unmarshal(notif, &member.Notifications)
 	return &member, nil
 }
 

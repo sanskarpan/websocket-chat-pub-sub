@@ -64,10 +64,10 @@ func TestConfigValidationInProduction(t *testing.T) {
 
 func TestEnvironmentOverride(t *testing.T) {
 	privPEM, pubPEM := generateTestRSAKeyPair(t)
-	os.Setenv("JWT_PRIVATE_KEY", privPEM)
-	os.Setenv("JWT_PUBLIC_KEY", pubPEM)
-	defer os.Unsetenv("JWT_PRIVATE_KEY")
-	defer os.Unsetenv("JWT_PUBLIC_KEY")
+	_ = os.Setenv("JWT_PRIVATE_KEY", privPEM)
+	_ = os.Setenv("JWT_PUBLIC_KEY", pubPEM)
+	defer func() { _ = os.Unsetenv("JWT_PRIVATE_KEY") }()
+	defer func() { _ = os.Unsetenv("JWT_PUBLIC_KEY") }()
 
 	cfg := config.Load()
 	assert.Equal(t, privPEM, cfg.Auth.JWT.PrivateKey)

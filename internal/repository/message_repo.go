@@ -57,9 +57,9 @@ func (r *MessageRepository) GetByID(ctx context.Context, id string) (*model.Mess
 	if err != nil {
 		return nil, err
 	}
-	json.Unmarshal(reactions, &msg.Reactions)
-	json.Unmarshal(attachments, &msg.Attachments)
-	json.Unmarshal(metadata, &msg.Metadata)
+	_ = json.Unmarshal(reactions, &msg.Reactions)
+	_ = json.Unmarshal(attachments, &msg.Attachments)
+	_ = json.Unmarshal(metadata, &msg.Metadata)
 	return &msg, nil
 }
 
@@ -104,9 +104,9 @@ func (r *MessageRepository) GetByRoom(ctx context.Context, roomID string, limit 
 		if err != nil {
 			return nil, err
 		}
-		json.Unmarshal(reactions, &msg.Reactions)
-		json.Unmarshal(attachments, &msg.Attachments)
-		json.Unmarshal(metadata, &msg.Metadata)
+		_ = json.Unmarshal(reactions, &msg.Reactions)
+		_ = json.Unmarshal(attachments, &msg.Attachments)
+		_ = json.Unmarshal(metadata, &msg.Metadata)
 		messages = append(messages, &msg)
 	}
 	if err := rows.Err(); err != nil {
@@ -148,7 +148,7 @@ func (r *MessageRepository) UpdateReactionsTx(ctx context.Context, msgID string,
 	if err != nil {
 		return err
 	}
-	defer tx.Rollback(ctx)
+	defer func() { _ = tx.Rollback(ctx) }()
 
 	var existing []byte
 	row := tx.QueryRow(ctx, `SELECT reactions FROM messages WHERE id = $1 FOR UPDATE`, msgID)
@@ -215,9 +215,9 @@ func (r *MessageRepository) GetThread(ctx context.Context, parentID string, limi
 		if err != nil {
 			return nil, err
 		}
-		json.Unmarshal(reactions, &msg.Reactions)
-		json.Unmarshal(attachments, &msg.Attachments)
-		json.Unmarshal(metadata, &msg.Metadata)
+		_ = json.Unmarshal(reactions, &msg.Reactions)
+		_ = json.Unmarshal(attachments, &msg.Attachments)
+		_ = json.Unmarshal(metadata, &msg.Metadata)
 		messages = append(messages, &msg)
 	}
 	if err := rows.Err(); err != nil {

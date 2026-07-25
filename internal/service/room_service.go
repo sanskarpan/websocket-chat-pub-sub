@@ -82,7 +82,7 @@ func (s *RoomService) GetByID(ctx context.Context, id string) (*model.Room, erro
 		return nil, err
 	}
 
-	s.redisCache.SetObject(ctx, cacheKey, room, 5*time.Minute)
+	_ = s.redisCache.SetObject(ctx, cacheKey, room, 5*time.Minute)
 	return room, nil
 }
 
@@ -97,14 +97,14 @@ func (s *RoomService) Update(ctx context.Context, room *model.Room) error {
 	}
 
 	cacheKey := "room:" + room.ID
-	s.redisCache.Del(ctx, cacheKey)
+	_ = s.redisCache.Del(ctx, cacheKey)
 	return nil
 }
 
 func (s *RoomService) Delete(ctx context.Context, id string) error {
 	err := s.roomRepo.Delete(ctx, id)
 	if err == nil {
-		s.redisCache.Del(ctx, "room:"+id)
+		_ = s.redisCache.Del(ctx, "room:"+id)
 	}
 	return err
 }
@@ -128,7 +128,7 @@ func (s *RoomService) AddMember(ctx context.Context, roomID, userID string, role
 		return err
 	}
 
-	s.redisCache.Del(ctx, "room:"+roomID)
+	_ = s.redisCache.Del(ctx, "room:"+roomID)
 	return nil
 }
 
@@ -138,7 +138,7 @@ func (s *RoomService) RemoveMember(ctx context.Context, roomID, userID string) e
 		return err
 	}
 
-	s.redisCache.Del(ctx, "room:"+roomID)
+	_ = s.redisCache.Del(ctx, "room:"+roomID)
 	return nil
 }
 
@@ -182,12 +182,12 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string) error
 			return err
 		}
 		if s.redisCache != nil {
-			s.redisCache.Del(ctx, "room:"+roomID)
+			_ = s.redisCache.Del(ctx, "room:"+roomID)
 		}
 	}
 
 	if s.ps != nil {
-		s.ps.SubscribeToRoom(ctx, roomID, userID)
+		_ = s.ps.SubscribeToRoom(ctx, roomID, userID)
 	}
 
 	return nil
@@ -202,11 +202,11 @@ func (s *RoomService) LeaveRoom(ctx context.Context, roomID, userID string) erro
 		return err
 	}
 	if s.redisCache != nil {
-		s.redisCache.Del(ctx, "room:"+roomID)
+		_ = s.redisCache.Del(ctx, "room:"+roomID)
 	}
 
 	if s.ps != nil {
-		s.ps.UnsubscribeFromRoom(ctx, roomID, userID)
+		_ = s.ps.UnsubscribeFromRoom(ctx, roomID, userID)
 	}
 
 	return nil

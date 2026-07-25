@@ -56,7 +56,7 @@ func main() {
 		if err != nil {
 			logger.Error().Err(err).Msg("Failed to initialize tracer")
 		} else {
-			defer tracer.Shutdown(context.Background())
+			defer func() { _ = tracer.Shutdown(context.Background()) }()
 		}
 	}
 
@@ -73,7 +73,7 @@ func main() {
 		PoolSize: cfg.Redis.PoolSize,
 	}
 	redisClient := pubsub.NewRedisClient(redisCfg)
-	defer redisClient.Close()
+	defer func() { _ = redisClient.Close() }()
 
 	redisCache := cache.NewRedisCache(redisClient)
 	ps := pubsub.NewRedisPubSub(redisClient)

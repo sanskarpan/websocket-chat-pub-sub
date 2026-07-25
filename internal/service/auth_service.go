@@ -125,7 +125,7 @@ func (s *AuthService) Login(ctx context.Context, input LoginInput) (*TokenPair, 
 	defer spanEnd()
 	user, err := s.userRepo.GetByEmail(ctx, input.Email)
 	if err != nil {
-		bcrypt.CompareHashAndPassword(s.dummyHash, []byte(input.Password))
+		_ = bcrypt.CompareHashAndPassword(s.dummyHash, []byte(input.Password))
 		return nil, ErrInvalidCredentials
 	}
 
