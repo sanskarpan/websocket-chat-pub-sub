@@ -41,7 +41,7 @@ func (g *Generator) Generate() int64 {
 	if now == g.lastTime {
 		g.sequence = (g.sequence + 1) & sequenceMask
 		if g.sequence == 0 {
-			now = g.waitNextMillisLocked(now)
+			now = g.waitNextMillisLocked()
 		}
 	} else {
 		g.sequence = 0
@@ -54,9 +54,9 @@ func (g *Generator) Generate() int64 {
 	return id
 }
 
-func (g *Generator) waitNextMillisLocked(currentTime int64) int64 {
+func (g *Generator) waitNextMillisLocked() int64 {
 	for {
-		currentTime = time.Now().UnixNano() / 1000000
+		currentTime := time.Now().UnixNano() / 1000000
 		if currentTime > g.lastTime {
 			return currentTime
 		}

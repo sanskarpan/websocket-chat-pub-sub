@@ -33,7 +33,7 @@ func (s *UserService) GetByID(ctx context.Context, id string) (*model.User, erro
 		return nil, err
 	}
 
-	s.redisCache.SetObject(ctx, cacheKey, user, 5*time.Minute)
+	_ = s.redisCache.SetObject(ctx, cacheKey, user, 5*time.Minute)
 	return user, nil
 }
 
@@ -48,7 +48,7 @@ func (s *UserService) Update(ctx context.Context, user *model.User) error {
 	}
 
 	cacheKey := "user:" + user.ID
-	s.redisCache.Del(ctx, cacheKey)
+	_ = s.redisCache.Del(ctx, cacheKey)
 	return nil
 }
 
