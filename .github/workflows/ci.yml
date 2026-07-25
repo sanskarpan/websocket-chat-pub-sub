@@ -91,6 +91,7 @@ jobs:
       - name: Start Server
         env:
           DB_PASSWORD: postgres
+          AUTH_RATE_LIMIT_DISABLE: "1"
         run: |
           ./server &
           SERVER_PID=$!
@@ -108,6 +109,7 @@ jobs:
       - name: Run E2E Tests
         env:
           DB_PASSWORD: postgres
+          AUTH_RATE_LIMIT_DISABLE: "1"
         run: go test -buildvcs=false -race -v -tags=e2e ./test/e2e/...
 
       - name: Stop Server
