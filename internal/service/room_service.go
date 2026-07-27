@@ -11,6 +11,11 @@ import (
 	"github.com/websocket-chat/internal/repository"
 )
 
+var (
+	ErrRoomNotFound = errors.New("room not found")
+	ErrUserBanned   = errors.New("user is banned from this room")
+)
+
 type RoomService struct {
 	roomRepo   repository.IRoomRepository
 	userRepo   repository.IUserRepository
@@ -72,9 +77,11 @@ func (s *RoomService) Create(ctx context.Context, input CreateRoomInput) (*model
 
 func (s *RoomService) GetByID(ctx context.Context, id string) (*model.Room, error) {
 	cacheKey := "room:" + id
-	var cached model.Room
-	if err := s.redisCache.GetObject(ctx, cacheKey, &cached); err == nil {
-		return &cached, nil
+	if s.redisCache != nil {
+		var cached model.Room
+		if err := s.redisCache.GetObject(ctx, cacheKey, &cached); err == nil {
+			return &cached, nil
+		}
 	}
 
 	room, err := s.roomRepo.GetByID(ctx, id)
@@ -82,7 +89,9 @@ func (s *RoomService) GetByID(ctx context.Context, id string) (*model.Room, erro
 		return nil, err
 	}
 
-	_ = s.redisCache.SetObject(ctx, cacheKey, room, 5*time.Minute)
+	if s.redisCache != nil {
+		_ = s.redisCache.SetObject(ctx, cacheKey, room, 5*time.Minute)
+	}
 	return room, nil
 }
 
@@ -152,13 +161,13 @@ func (s *RoomService) IsMember(ctx context.Context, roomID, userID string) (bool
 
 func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string) error {
 	if _, err := s.roomRepo.GetByID(ctx, roomID); err != nil {
-		return errors.New("room not found")
+		return ErrRoomNotFound
 	}
 
 	member, err := s.roomRepo.GetMember(ctx, roomID, userID)
 	if err == nil && member != nil {
 		if member.BannedAt != nil {
-			return errors.New("user is banned from this room")
+			return ErrUserBanned
 		}
 		if member.LeftAt == nil {
 			return nil

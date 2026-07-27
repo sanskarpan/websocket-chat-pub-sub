@@ -101,7 +101,7 @@ func main() {
 	gin.SetMode(gin.ReleaseMode)
 	router := gin.New()
 
-	allowedOrigins := []string{"http://localhost:3000", "http://localhost:8085", "http://127.0.0.1:3000", "http://127.0.0.1:8085"}
+	allowedOrigins := cfg.Server.Websocket.AllowedOrigins
 	router.Use(gin.Recovery(), middleware.CORSMiddleware(allowedOrigins), middleware.RequestIDMiddleware(), middleware.RequestLoggingMiddleware(cfg.App.Name))
 
 	healthChecker := health.NewChecker(db, ps)
@@ -203,6 +203,7 @@ func setupRoutes(
 			auth.POST("/register", h.Register)
 			auth.POST("/login", h.Login)
 			auth.POST("/refresh", h.Refresh)
+			auth.POST("/logout", handlers.AuthMiddleware(authService), h.Logout)
 		}
 
 		rooms := api.Group("/rooms")

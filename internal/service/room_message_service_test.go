@@ -214,3 +214,61 @@ func TestMessageService_DeleteMessage_AuthorOrModerator(t *testing.T) {
 	err = msgService.DeleteMessage(context.Background(), msg.ID, "user-1")
 	require.NoError(t, err, "author should be able to delete own message")
 }
+
+func TestMessageService_DeleteMessage_NonMemberGetsCorrectError(t *testing.T) {
+	msgService, _ := setupMessageServiceWithMember(t)
+	msg, err := msgService.SendMessage(context.Background(), service.SendMessageInput{
+		RoomID: "room-1", UserID: "user-1", Content: "Hello",
+	})
+	require.NoError(t, err)
+
+	// stranger is not in the room at all — membership check fires first
+	err = msgService.DeleteMessage(context.Background(), msg.ID, "stranger-user")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "not a member", "non-member must receive membership error, not permission error")
+}
+
+func TestMessageService_SendMessage_DedupByClientID(t *testing.T) {
+	msgService, _ := setupMessageServiceWithMember(t)
+
+	msg1, err := msgService.SendMessage(context.Background(), service.SendMessageInput{
+		RoomID:   "room-1",
+		UserID:   "user-1",
+		Content:  "Hello from client",
+		ClientID: "client-abc-123",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, msg1)
+
+	// Same client_id — should return the exact same message, not create a new one
+	msg2, err := msgService.SendMessage(context.Background(), service.SendMessageInput{
+		RoomID:   "room-1",
+		UserID:   "user-1",
+		Content:  "Hello from client",
+		ClientID: "client-abc-123",
+	})
+	require.NoError(t, err)
+	require.NotNil(t, msg2)
+	assert.Equal(t, msg1.ID, msg2.ID, "duplicate client_id must return the original message")
+}
+
+func TestMessageService_SendMessage_DifferentClientIDsNotDeduped(t *testing.T) {
+	msgService, _ := setupMessageServiceWithMember(t)
+
+	msg1, err := msgService.SendMessage(context.Background(), service.SendMessageInput{
+		RoomID:   "room-1",
+		UserID:   "user-1",
+		Content:  "First message",
+		ClientID: "client-001",
+	})
+	require.NoError(t, err)
+
+	msg2, err := msgService.SendMessage(context.Background(), service.SendMessageInput{
+		RoomID:   "room-1",
+		UserID:   "user-1",
+		Content:  "Second message",
+		ClientID: "client-002",
+	})
+	require.NoError(t, err)
+	assert.NotEqual(t, msg1.ID, msg2.ID, "different client_ids must produce distinct messages")
+}

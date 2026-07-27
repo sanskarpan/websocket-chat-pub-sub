@@ -242,6 +242,14 @@ func (s *AuthService) validateToken(ctx context.Context, tokenString string, exp
 		return nil, ErrInvalidTokenType
 	}
 
+	if s.tokenInvalidator != nil {
+		if jti, ok := claims["jti"].(string); ok && jti != "" {
+			if invalidated, err := s.tokenInvalidator.IsTokenInvalidated(ctx, jti); err == nil && invalidated {
+				return nil, ErrInvalidToken
+			}
+		}
+	}
+
 	userID, ok := claims["sub"].(string)
 	if !ok {
 		return nil, ErrInvalidToken
@@ -336,6 +344,29 @@ func (s *AuthService) invalidateToken(ctx context.Context, jti string, ttl time.
 	return s.tokenInvalidator.InvalidateToken(ctx, jti, ttl)
 }
 
+// Logout blacklists the given access and refresh tokens by extracting their jtis
+// without signature verification (caller already holds the tokens; harmless to blacklist).
+func (s *AuthService) Logout(ctx context.Context, accessToken, refreshToken string) error {
+	var parser jwt.Parser
+	if accessToken != "" {
+		claims := jwt.MapClaims{}
+		if _, _, err := parser.ParseUnverified(accessToken, claims); err == nil {
+			if jti, ok := claims["jti"].(string); ok && jti != "" {
+				_ = s.invalidateToken(ctx, jti, s.cfg.Auth.JWT.AccessTokenTTL)
+			}
+		}
+	}
+	if refreshToken != "" {
+		claims := jwt.MapClaims{}
+		if _, _, err := parser.ParseUnverified(refreshToken, claims); err == nil {
+			if jti, ok := claims["jti"].(string); ok && jti != "" {
+				_ = s.invalidateToken(ctx, jti, s.cfg.Auth.JWT.RefreshTokenTTL)
+			}
+		}
+	}
+	return nil
+}
+
 type TokenInvalidator interface {
 	InvalidateToken(ctx context.Context, jti string, ttl time.Duration) error
 	IsTokenInvalidated(ctx context.Context, jti string) (bool, error)
@@ -346,6 +377,7 @@ func (s *AuthService) generateAccessToken(user *model.User) (string, error) {
 	claims := jwt.MapClaims{
 		"sub":  user.ID,
 		"type": "access",
+		"jti":  uuid.New().String(),
 		"exp":  now.Add(s.cfg.Auth.JWT.AccessTokenTTL).Unix(),
 		"iat":  now.Unix(),
 		"iss":  s.cfg.Auth.JWT.Issuer,

@@ -3,6 +3,7 @@
 [![CI/CD Pipeline](https://github.com/sanskarpan/websocket-chat-pub-sub/actions/workflows/ci.yml/badge.svg)](https://github.com/sanskarpan/websocket-chat-pub-sub/actions/workflows/ci.yml)
 [![Go Version](https://img.shields.io/badge/Go-1.23%2B-blue)](https://golang.org)
 [![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-teal)](https://sanskarpan.github.io/websocket-chat-pub-sub/)
 
 A high-performance, distributed, real-time WebSocket chat and Pub/Sub backend built with **Go**, **PostgreSQL**, **Redis**, **Gin**, and **Docker**. Designed for resilience under high throughput with horizontal scalability, structured logging, Prometheus observability, and robust security controls.
 
@@ -241,6 +242,25 @@ Response `200`:
   "token_type": "Bearer"
 }
 ```
+
+#### Logout
+
+```http
+POST /api/v1/auth/logout
+Authorization: Bearer <access_token>
+Content-Type: application/json
+
+{
+  "refresh_token": "dGhpcyBpcyBhIHJlZnJl..."
+}
+```
+
+Response `200`:
+```json
+{"status": "logged_out"}
+```
+
+Blacklists the `jti` of both the access token (from the `Authorization` header) and the refresh token (from the request body). Both tokens are immediately invalid for all subsequent requests across all server replicas.
 
 ### Rooms (`/api/v1/rooms`)
 
@@ -522,13 +542,18 @@ All logs are output as JSON with the following fields:
 
 ## Security
 
-- **RS256 JWT**: Asymmetric RSA-2048 signing keys (auto-generated in dev, configurable in prod)
-- **Timing-Attack Mitigation**: Login uses a dummy bcrypt hash when user not found to normalize response timing
-- **Fail-Closed Rate Limiting**: Denies requests when Redis is unreachable
-- **Password Hashing**: bcrypt with cost factor 12; hashes excluded from search API responses
-- **XSS Protection**: Script tags stripped before HTML entity escaping
-- **Message Deduplication**: Client-provided `client_id` prevents duplicate message processing (5-minute window)
-- **Config Validation**: Production mode enforces JWT keys and database password
+- **RS256 JWT**: Asymmetric RSA-2048 signing keys (auto-generated in dev, injected via env vars in prod)
+- **Token Blacklisting on Logout**: `POST /api/v1/auth/logout` blacklists both access and refresh token JTIs in Redis; tokens are invalid immediately on all replicas
+- **Refresh Token Rotation**: each refresh token is single-use; the old JTI is blacklisted before a new pair is issued
+- **`Retry-After` on Rate Limit**: every `429` response includes a `Retry-After` header with the cooldown seconds
+- **Config-Driven CORS**: allowed origins come from `cfg.Server.Websocket.AllowedOrigins` — not hardcoded
+- **Timing-Attack Mitigation**: Login always runs bcrypt even when the email is not found, to normalize response timing
+- **Fail-Closed Rate Limiting**: denies requests when Redis is unreachable
+- **Password Hashing**: bcrypt with cost factor 12
+- **XSS Protection**: script tags stripped before HTML entity escaping
+- **Distributed Message Deduplication**: `client_id` checked against Redis (not in-memory) — works correctly across k8s replicas
+- **Sentinel Errors**: `ErrRoomNotFound` → 404, `ErrUserBanned` → 403 — no 500 leakage for domain errors
+- **Config Validation**: production mode enforces explicit JWT keys and database password
 - **Graceful Shutdown**: 30-second context timeout with ordered server shutdown
 
 ---

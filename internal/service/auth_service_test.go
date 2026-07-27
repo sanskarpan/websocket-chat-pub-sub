@@ -6,6 +6,7 @@ import (
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
+	"sync"
 	"testing"
 	"time"
 
@@ -274,6 +275,116 @@ func TestAuthService_RefreshToken_InvalidatesOld(t *testing.T) {
 	tokens2, err := authService.RefreshToken(context.Background(), tokens1.RefreshToken)
 	require.NoError(t, err)
 	assert.NotEqual(t, tokens1.RefreshToken, tokens2.RefreshToken)
+}
+
+func newFakeInvalidator() *fakeTokenInvalidator {
+	return &fakeTokenInvalidator{data: make(map[string]bool)}
+}
+
+type fakeTokenInvalidator struct {
+	mu   sync.Mutex
+	data map[string]bool
+}
+
+func (f *fakeTokenInvalidator) InvalidateToken(_ context.Context, jti string, _ time.Duration) error {
+	f.mu.Lock(); defer f.mu.Unlock()
+	f.data[jti] = true; return nil
+}
+
+func (f *fakeTokenInvalidator) IsTokenInvalidated(_ context.Context, jti string) (bool, error) {
+	f.mu.Lock(); defer f.mu.Unlock()
+	return f.data[jti], nil
+}
+
+func (f *fakeTokenInvalidator) invalidatedCount() int {
+	f.mu.Lock(); defer f.mu.Unlock()
+	return len(f.data)
+}
+
+func TestAuthService_ValidateToken_BlacklistedJTI(t *testing.T) {
+	cfg := testConfig(t)
+	userRepo := NewFakeUserRepository()
+	authService := service.NewAuthService(cfg, userRepo)
+	inv := newFakeInvalidator()
+	authService.SetTokenInvalidator(inv)
+
+	_, err := authService.Register(context.Background(), service.RegisterInput{
+		Username: "bluser", Email: "bl@example.com", Password: "password123",
+	})
+	require.NoError(t, err)
+
+	tokens, err := authService.Login(context.Background(), service.LoginInput{
+		Email: "bl@example.com", Password: "password123",
+	})
+	require.NoError(t, err)
+
+	// token is valid before blacklist
+	_, err = authService.ValidateToken(context.Background(), tokens.AccessToken)
+	require.NoError(t, err)
+
+	// blacklist the token via logout
+	require.NoError(t, authService.Logout(context.Background(), tokens.AccessToken, ""))
+
+	// token is now rejected
+	_, err = authService.ValidateToken(context.Background(), tokens.AccessToken)
+	assert.ErrorIs(t, err, service.ErrInvalidToken, "blacklisted access token must be rejected")
+}
+
+func TestAuthService_Logout_BlacklistsBothTokens(t *testing.T) {
+	cfg := testConfig(t)
+	userRepo := NewFakeUserRepository()
+	authService := service.NewAuthService(cfg, userRepo)
+	inv := newFakeInvalidator()
+	authService.SetTokenInvalidator(inv)
+
+	_, err := authService.Register(context.Background(), service.RegisterInput{
+		Username: "logoutuser", Email: "logout@example.com", Password: "password123",
+	})
+	require.NoError(t, err)
+
+	tokens, err := authService.Login(context.Background(), service.LoginInput{
+		Email: "logout@example.com", Password: "password123",
+	})
+	require.NoError(t, err)
+
+	require.NoError(t, authService.Logout(context.Background(), tokens.AccessToken, tokens.RefreshToken))
+
+	// access token blacklisted
+	_, err = authService.ValidateToken(context.Background(), tokens.AccessToken)
+	assert.ErrorIs(t, err, service.ErrInvalidToken, "access token must be rejected after logout")
+
+	// refresh token blacklisted — validate via RefreshToken path
+	_, err = authService.RefreshToken(context.Background(), tokens.RefreshToken)
+	assert.ErrorIs(t, err, service.ErrInvalidToken, "refresh token must be rejected after logout")
+
+	assert.Equal(t, 2, inv.invalidatedCount(), "exactly two jtis should be blacklisted")
+}
+
+func TestAuthService_RefreshToken_OldTokenRejectedAfterRotation(t *testing.T) {
+	cfg := testConfig(t)
+	userRepo := NewFakeUserRepository()
+	authService := service.NewAuthService(cfg, userRepo)
+	inv := newFakeInvalidator()
+	authService.SetTokenInvalidator(inv)
+
+	_, err := authService.Register(context.Background(), service.RegisterInput{
+		Username: "rotateuser", Email: "rotate@example.com", Password: "password123",
+	})
+	require.NoError(t, err)
+
+	tokens1, err := authService.Login(context.Background(), service.LoginInput{
+		Email: "rotate@example.com", Password: "password123",
+	})
+	require.NoError(t, err)
+
+	time.Sleep(10 * time.Millisecond)
+	tokens2, err := authService.RefreshToken(context.Background(), tokens1.RefreshToken)
+	require.NoError(t, err)
+	assert.NotEmpty(t, tokens2.AccessToken)
+
+	// old refresh token is now blacklisted
+	_, err = authService.RefreshToken(context.Background(), tokens1.RefreshToken)
+	assert.ErrorIs(t, err, service.ErrInvalidToken, "old refresh token must be rejected after rotation")
 }
 
 func TestPasswordHashing(t *testing.T) {
