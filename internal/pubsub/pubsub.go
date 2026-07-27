@@ -3,6 +3,7 @@ package pubsub
 import (
 	"context"
 	"encoding/json"
+	"math/rand"
 	"strconv"
 	"time"
 
@@ -28,6 +29,8 @@ type PubSub interface {
 	CheckRateLimit(ctx context.Context, key string, limit int, window time.Duration) (bool, error)
 	InvalidateToken(ctx context.Context, jti string, ttl time.Duration) error
 	IsTokenInvalidated(ctx context.Context, jti string) (bool, error)
+	GetDedup(ctx context.Context, key string) (string, error)
+	SetDedup(ctx context.Context, key, msgID string, ttl time.Duration) error
 	Close() error
 }
 
@@ -246,7 +249,7 @@ func (p *RedisPubSub) CheckRateLimit(ctx context.Context, key string, limit int,
 	defer recordRedisDuration("check_rate_limit", time.Now())
 	rateKey := "ratelimit:" + key
 	now := time.Now().UnixNano()
-	member := strconv.FormatInt(now, 10)
+	member := strconv.FormatInt(now, 10) + ":" + strconv.FormatInt(rand.Int63(), 36)
 
 	windowNs := int64(window)
 	windowMs := int64(window / time.Millisecond)
@@ -258,6 +261,20 @@ func (p *RedisPubSub) CheckRateLimit(ctx context.Context, key string, limit int,
 		return false, err
 	}
 	return result == 1, nil
+}
+
+func (p *RedisPubSub) GetDedup(ctx context.Context, key string) (string, error) {
+	defer recordRedisDuration("get_dedup", time.Now())
+	val, err := p.client.Get(ctx, "dedup:"+key).Result()
+	if err == redis.Nil {
+		return "", nil
+	}
+	return val, err
+}
+
+func (p *RedisPubSub) SetDedup(ctx context.Context, key, msgID string, ttl time.Duration) error {
+	defer recordRedisDuration("set_dedup", time.Now())
+	return p.client.Set(ctx, "dedup:"+key, msgID, ttl).Err()
 }
 
 func (p *RedisPubSub) Close() error {

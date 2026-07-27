@@ -3,8 +3,10 @@ package service_test
 import (
 	"context"
 	"errors"
+	"fmt"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/websocket-chat/internal/model"
@@ -284,6 +286,8 @@ func (r *FakeRoomRepository) MarkRead(ctx context.Context, roomID, userID, messa
 	return nil
 }
 
+var msgSeq uint64
+
 type FakeMessageRepository struct {
 	mu       sync.RWMutex
 	messages map[string]*model.Message
@@ -299,7 +303,8 @@ func (r *FakeMessageRepository) Create(ctx context.Context, msg *model.Message) 
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	if msg.ID == "" {
-		msg.ID = "msg-" + msg.RoomID + "-" + msg.UserID
+		seq := atomic.AddUint64(&msgSeq, 1)
+		msg.ID = fmt.Sprintf("msg-%s-%s-%d", msg.RoomID, msg.UserID, seq)
 	}
 	msg.CreatedAt = time.Now()
 	r.messages[msg.ID] = msg

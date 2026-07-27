@@ -23,26 +23,9 @@ type dedupEntry struct {
 }
 
 var (
-	clientDedup   sync.Map
-	dedupTTL      = 5 * time.Minute
-	dedupCleanup  = 10 * time.Minute
+	clientDedup sync.Map
+	dedupTTL    = 5 * time.Minute
 )
-
-func init() {
-	go func() {
-		for {
-			time.Sleep(dedupCleanup)
-			now := time.Now()
-			clientDedup.Range(func(key, value interface{}) bool {
-				entry := value.(dedupEntry)
-				if now.Sub(entry.timestamp) > dedupTTL {
-					clientDedup.Delete(key)
-				}
-				return true
-			})
-		}
-	}()
-}
 
 type MessageService struct {
 	messageRepo repository.IMessageRepository
@@ -74,7 +57,7 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 	defer spanEnd()
 
 	if input.ClientID != "" {
-		if existing, err := s.checkDedup(ctx, input.UserID, input.ClientID); err == nil {
+		if existing, err := s.checkDedup(ctx, input.UserID, input.ClientID); existing != nil && err == nil {
 			return existing, nil
 		}
 	}
@@ -113,7 +96,7 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 	}
 
 	if input.ClientID != "" {
-		markDedup(input.UserID, input.ClientID, msg.ID)
+		s.markDedup(ctx, input.UserID, input.ClientID, msg.ID)
 	}
 
 	if s.pubsub != nil {
@@ -129,19 +112,37 @@ func (s *MessageService) SendMessage(ctx context.Context, input SendMessageInput
 
 func (s *MessageService) checkDedup(ctx context.Context, userID, clientID string) (*model.Message, error) {
 	key := userID + ":" + clientID
-	if v, ok := clientDedup.Load(key); ok {
-		entry := v.(dedupEntry)
-		existing, err := s.messageRepo.GetByID(ctx, entry.msgID)
+	if s.pubsub != nil {
+		msgID, err := s.pubsub.GetDedup(ctx, key)
+		if err != nil || msgID == "" {
+			return nil, errors.New("not a duplicate")
+		}
+		existing, err := s.messageRepo.GetByID(ctx, msgID)
 		if err == nil {
 			return existing, nil
+		}
+		return nil, errors.New("not a duplicate")
+	}
+	// Fallback: in-memory dedup for tests (no pubsub)
+	if v, ok := clientDedup.Load(key); ok {
+		entry := v.(dedupEntry)
+		if time.Since(entry.timestamp) < dedupTTL {
+			existing, err := s.messageRepo.GetByID(ctx, entry.msgID)
+			if err == nil {
+				return existing, nil
+			}
 		}
 		clientDedup.Delete(key)
 	}
 	return nil, errors.New("not a duplicate")
 }
 
-func markDedup(userID, clientID, msgID string) {
+func (s *MessageService) markDedup(ctx context.Context, userID, clientID, msgID string) {
 	key := userID + ":" + clientID
+	if s.pubsub != nil {
+		_ = s.pubsub.SetDedup(ctx, key, msgID, dedupTTL)
+		return
+	}
 	clientDedup.Store(key, dedupEntry{msgID: msgID, timestamp: time.Now()})
 }
 
@@ -216,6 +217,11 @@ func (s *MessageService) DeleteMessage(ctx context.Context, msgID, requesterID s
 		return errors.New("message already deleted")
 	}
 
+	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
+	if err != nil || !isMember {
+		return errors.New("unauthorized: not a member of this room")
+	}
+
 	if msg.UserID != requesterID {
 		member, err := s.roomRepo.GetMember(ctx, msg.RoomID, requesterID)
 		if err != nil || member == nil {
@@ -224,11 +230,6 @@ func (s *MessageService) DeleteMessage(ctx context.Context, msgID, requesterID s
 		if member.Role != model.RoleOwner && member.Role != model.RoleAdmin && member.Role != model.RoleModerator {
 			return errors.New("unauthorized: only author or room moderator/admin can delete this message")
 		}
-	}
-
-	isMember, err := s.roomRepo.IsMember(ctx, msg.RoomID, requesterID)
-	if err != nil || !isMember {
-		return errors.New("unauthorized: not a member of this room")
 	}
 
 	if err := s.messageRepo.Delete(ctx, msgID, requesterID); err != nil {

@@ -463,6 +463,60 @@ func TestE2E_TokenRefresh(t *testing.T) {
 	})
 }
 
+func TestE2E_Logout(t *testing.T) {
+	suffix := randomString(8)
+	username := "logout_" + suffix
+	email := "logout_" + suffix + "@example.com"
+	password := "password123"
+
+	_, status := registerUser(t, username, email, password)
+	require.Equal(t, http.StatusCreated, status)
+
+	tokens, status := loginUser(t, email, password)
+	require.Equal(t, http.StatusOK, status)
+
+	t.Run("access_works_before_logout", func(t *testing.T) {
+		resp := doRequest(t, "GET", apiV1+"/rooms", nil,
+			map[string]string{"Authorization": "Bearer " + tokens.AccessToken})
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("logout_succeeds", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]string{"refresh_token": tokens.RefreshToken})
+		resp := doRequest(t, "POST", apiV1+"/auth/logout", body, map[string]string{
+			"Content-Type":  contentType,
+			"Authorization": "Bearer " + tokens.AccessToken,
+		})
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+	})
+
+	t.Run("access_token_rejected_after_logout", func(t *testing.T) {
+		resp := doRequest(t, "GET", apiV1+"/rooms", nil,
+			map[string]string{"Authorization": "Bearer " + tokens.AccessToken})
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+			"access token must be blacklisted after logout")
+	})
+
+	t.Run("refresh_token_rejected_after_logout", func(t *testing.T) {
+		body, _ := json.Marshal(map[string]string{"refresh_token": tokens.RefreshToken})
+		resp := doRequest(t, "POST", apiV1+"/auth/refresh", body,
+			map[string]string{"Content-Type": contentType})
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode,
+			"refresh token must be blacklisted after logout")
+	})
+
+	t.Run("logout_without_auth_rejected", func(t *testing.T) {
+		resp := doRequest(t, "POST", apiV1+"/auth/logout", nil,
+			map[string]string{"Content-Type": contentType})
+		defer resp.Body.Close()
+		assert.Equal(t, http.StatusUnauthorized, resp.StatusCode)
+	})
+}
+
 func TestE2E_RoomOperations(t *testing.T) {
 	suffix := randomString(8)
 	username := "roomops_" + suffix

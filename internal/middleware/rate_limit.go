@@ -2,6 +2,7 @@ package middleware
 
 import (
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -27,6 +28,7 @@ func RateLimitMiddleware(ps pubsub.PubSub, actionKey string, limit int, window t
 		allowed, err := ps.CheckRateLimit(c.Request.Context(), key, limit, window)
 		if err != nil || !allowed {
 			metrics.RateLimitedRequestsTotal.WithLabelValues(actionKey).Inc()
+			c.Header("Retry-After", strconv.Itoa(int(window.Seconds())))
 			c.JSON(http.StatusTooManyRequests, gin.H{
 				"code":        "RATE_LIMIT_EXCEEDED",
 				"message":     "Too many requests, please try again later",

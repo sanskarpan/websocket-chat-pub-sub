@@ -1,0 +1,78 @@
+site_name: "ws-chat — Distributed WebSocket Pub/Sub"
+site_description: "A production-grade, horizontally scalable WebSocket chat backend with RS256 JWT auth, Redis Pub/Sub fanout, PostgreSQL persistence, and Prometheus observability."
+site_url: https://sanskarpan.github.io/websocket-chat-pub-sub/
+repo_url: https://github.com/sanskarpan/websocket-chat-pub-sub
+repo_name: sanskarpan/websocket-chat-pub-sub
+edit_uri: edit/main/docs/
+
+theme:
+  name: material
+  palette:
+    - scheme: default
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/brightness-7
+        name: Switch to dark mode
+    - scheme: slate
+      primary: teal
+      accent: cyan
+      toggle:
+        icon: material/brightness-4
+        name: Switch to light mode
+  features:
+    - navigation.sections
+    - navigation.top
+    - navigation.tracking
+    - navigation.expand
+    - content.code.copy
+    - content.code.annotate
+    - search.suggest
+    - search.highlight
+    - toc.follow
+
+markdown_extensions:
+  - admonition
+  - tables
+  - toc:
+      permalink: true
+  - pymdownx.highlight:
+      anchor_linenums: true
+  - pymdownx.superfences:
+      custom_fences:
+        - name: mermaid
+          class: mermaid
+          format: !!python/name:pymdownx.superfences.fence_code_format
+  - pymdownx.inlinehilite
+  - pymdownx.details
+  - pymdownx.tabbed:
+      alternate_style: true
+  - attr_list
+  - md_in_html
+
+plugins:
+  - search
+
+nav:
+  - Home: index.md
+  - Getting Started:
+    - Quickstart: quickstart.md
+    - Configuration: configuration.md
+  - Architecture:
+    - System Overview: architecture.md
+    - WebSocket Protocol: websocket-protocol.md
+  - API Reference:
+    - REST API: rest-api.md
+    - Authentication: authentication.md
+  - Operations:
+    - Deployment: deployment.md
+    - Monitoring & Observability: monitoring.md
+    - Security Model: security.md
+    - Testing: testing.md
+  - Design Records:
+    - ADR Overview: adr/index.md
+    - "0001 — JWT Auth & RS256": adr/0001-jwt-authentication-and-authorization.md
+    - "0002 — Redis Pub/Sub & Dedup": adr/0002-redis-pubsub-and-presence.md
+    - "0003 — Graceful Shutdown": adr/0003-graceful-shutdown-and-connection-draining.md
+    - "0004 — Token Blacklisting & Logout": adr/0004-token-blacklisting-and-logout.md
+    - Runbook: runbook.md

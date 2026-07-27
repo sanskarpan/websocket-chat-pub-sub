@@ -268,52 +268,52 @@ func (s *Server) subscribeToPresence() {
 					break presenceLoop
 				}
 
-var data struct {
-				UserID   string          `json:"user_id"`
-				Presence *model.Presence `json:"presence"`
-			}
-			if err := json.Unmarshal([]byte(msg.Payload), &data); err != nil {
-				continue
-			}
-
-			if data.Presence == nil {
-				continue
-			}
-
-			presenceMsg, err := protocol.NewServerMessage(protocol.ServerMsgPresence, map[string]interface{}{
-				"user_id":  data.UserID,
-				"status":   data.Presence.Status,
-				"presence": data.Presence,
-			})
-			if err != nil {
-				s.logger.Error().Err(err).Msg("Failed to create presence message")
-				continue
-			}
-			presenceBytes, err := presenceMsg.ToJSON()
-			if err != nil {
-				s.logger.Error().Err(err).Msg("Failed to marshal presence message")
-				continue
-			}
-
-			s.hub.mu.RLock()
-			clients := make([]*Client, 0, len(s.hub.clients))
-			for _, client := range s.hub.clients {
-				if !client.isClosed() {
-					clients = append(clients, client)
+				var data struct {
+					UserID   string          `json:"user_id"`
+					Presence *model.Presence `json:"presence"`
 				}
-			}
-			s.hub.mu.RUnlock()
+				if err := json.Unmarshal([]byte(msg.Payload), &data); err != nil {
+					continue
+				}
 
-			for _, client := range clients {
-				select {
-				case client.send <- presenceBytes:
-				default:
+				if data.Presence == nil {
+					continue
+				}
+
+				presenceMsg, err := protocol.NewServerMessage(protocol.ServerMsgPresence, map[string]interface{}{
+					"user_id":  data.UserID,
+					"status":   data.Presence.Status,
+					"presence": data.Presence,
+				})
+				if err != nil {
+					s.logger.Error().Err(err).Msg("Failed to create presence message")
+					continue
+				}
+				presenceBytes, err := presenceMsg.ToJSON()
+				if err != nil {
+					s.logger.Error().Err(err).Msg("Failed to marshal presence message")
+					continue
+				}
+
+				s.hub.mu.RLock()
+				clients := make([]*Client, 0, len(s.hub.clients))
+				for _, client := range s.hub.clients {
+					if !client.isClosed() {
+						clients = append(clients, client)
+					}
+				}
+				s.hub.mu.RUnlock()
+
+				for _, client := range clients {
+					select {
+					case client.send <- presenceBytes:
+					default:
+					}
 				}
 			}
 		}
+		_ = sub.Close()
 	}
-	_ = sub.Close()
-}
 }
 
 func (s *Server) Shutdown(ctx context.Context) error {
@@ -466,6 +466,9 @@ func (s *Server) handleWebSocket(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) getAllowedOrigins() []string {
+	if len(s.cfg.Server.Websocket.AllowedOrigins) > 0 {
+		return s.cfg.Server.Websocket.AllowedOrigins
+	}
 	return []string{"http://localhost:3000", "http://localhost:8085", "http://127.0.0.1:3000", "http://127.0.0.1:8085"}
 }
 
@@ -478,9 +481,9 @@ func (s *Server) getClientIP(r *http.Request) string {
 }
 
 type Hub struct {
-	clients    map[string]*Client
-	users      map[string]map[string]bool
-	rooms      map[string]map[string]bool
+	clients map[string]*Client
+	users   map[string]map[string]bool
+	rooms   map[string]map[string]bool
 
 	register   chan *Client
 	unregister chan *Client
@@ -508,12 +511,6 @@ func NewHub(ps pubsub.PubSub, logger *zerolog.Logger) *Hub {
 }
 
 func (h *Hub) Run() {
-	defer func() {
-		for client := range h.unregister {
-			h.cleanupClient(client)
-		}
-	}()
-
 	for {
 		select {
 		case <-h.quit:
@@ -694,22 +691,22 @@ type BroadcastMessage struct {
 }
 
 type Client struct {
-	hub             *Hub
-	conn            *websocket.Conn
-	id              string
-	userID          string
-	rooms           map[string]bool
-	send            chan []byte
-	logger          *zerolog.Logger
-	roomService     *service.RoomService
-	messageService  *service.MessageService
-	presenceService *service.PresenceService
-	cfg             *config.Config
-	closed          atomic.Bool
+	hub              *Hub
+	conn             *websocket.Conn
+	id               string
+	userID           string
+	rooms            map[string]bool
+	send             chan []byte
+	logger           *zerolog.Logger
+	roomService      *service.RoomService
+	messageService   *service.MessageService
+	presenceService  *service.PresenceService
+	cfg              *config.Config
+	closed           atomic.Bool
 	closedInProgress atomic.Bool
-	ctx             context.Context
-	cancel          context.CancelFunc
-	ipCounter       *atomic.Int32
+	ctx              context.Context
+	cancel           context.CancelFunc
+	ipCounter        *atomic.Int32
 }
 
 func NewClient(hub *Hub, conn *websocket.Conn, userID string, logger *zerolog.Logger, roomService *service.RoomService, messageService *service.MessageService, presenceService *service.PresenceService, cfg *config.Config) *Client {
@@ -737,6 +734,7 @@ func (c *Client) ReadPump() {
 		select {
 		case c.hub.unregister <- c:
 		default:
+			c.hub.cleanupClient(c)
 		}
 		_ = c.conn.Close()
 		if c.ipCounter != nil {

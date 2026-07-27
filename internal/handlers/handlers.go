@@ -1,6 +1,7 @@
 package handlers
 
 import (
+	"errors"
 	"net/http"
 	"strconv"
 	"strings"
@@ -276,10 +277,36 @@ func (h *Handlers) JoinRoom(c *gin.Context) {
 	}
 
 	if err := h.roomService.JoinRoom(c.Request.Context(), roomID, uid); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"code": "JOIN_FAILED", "message": "Failed to join room"})
+		switch {
+		case errors.Is(err, service.ErrRoomNotFound):
+			c.JSON(http.StatusNotFound, gin.H{"code": "NOT_FOUND", "message": err.Error()})
+		case errors.Is(err, service.ErrUserBanned):
+			c.JSON(http.StatusForbidden, gin.H{"code": "FORBIDDEN", "message": err.Error()})
+		default:
+			c.JSON(http.StatusInternalServerError, gin.H{"code": "JOIN_FAILED", "message": "Failed to join room"})
+		}
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"status": "joined"})
+}
+
+func (h *Handlers) Logout(c *gin.Context) {
+	accessToken := c.GetHeader("Authorization")
+	if len(accessToken) > 7 && strings.EqualFold(accessToken[:7], "Bearer ") {
+		accessToken = accessToken[7:]
+	}
+
+	var body struct {
+		RefreshToken string `json:"refresh_token"`
+	}
+	_ = c.ShouldBindJSON(&body)
+
+	if err := h.authService.Logout(c.Request.Context(), accessToken, body.RefreshToken); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"code": "LOGOUT_FAILED", "message": "Failed to logout"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"status": "logged_out"})
 }
 
 func (h *Handlers) LeaveRoom(c *gin.Context) {

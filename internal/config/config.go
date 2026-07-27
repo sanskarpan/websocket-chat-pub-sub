@@ -67,6 +67,7 @@ type WebsocketConfig struct {
 	PongTimeout         time.Duration `mapstructure:"pong_timeout"`
 	WriteTimeout        time.Duration `mapstructure:"write_timeout"`
 	MaxConnectionsPerIP int           `mapstructure:"max_connections_per_ip"`
+	AllowedOrigins      []string      `mapstructure:"allowed_origins"`
 }
 
 type HTTPConfig struct {
@@ -265,6 +266,12 @@ func defaultConfig() *Config {
 				PongTimeout:         60 * time.Second,
 				WriteTimeout:        10 * time.Second,
 				MaxConnectionsPerIP: 10,
+				AllowedOrigins: []string{
+					"http://localhost:3000",
+					"http://localhost:8085",
+					"http://127.0.0.1:3000",
+					"http://127.0.0.1:8085",
+				},
 			},
 			HTTP: HTTPConfig{
 				ReadTimeout:    30 * time.Second,
