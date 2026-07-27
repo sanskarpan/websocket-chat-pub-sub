@@ -104,15 +104,15 @@ func (s *RoomService) Update(ctx context.Context, room *model.Room) error {
 	if err != nil {
 		return err
 	}
-
-	cacheKey := "room:" + room.ID
-	_ = s.redisCache.Del(ctx, cacheKey)
+	if s.redisCache != nil {
+		_ = s.redisCache.Del(ctx, "room:"+room.ID)
+	}
 	return nil
 }
 
 func (s *RoomService) Delete(ctx context.Context, id string) error {
 	err := s.roomRepo.Delete(ctx, id)
-	if err == nil {
+	if err == nil && s.redisCache != nil {
 		_ = s.redisCache.Del(ctx, "room:"+id)
 	}
 	return err
@@ -136,8 +136,9 @@ func (s *RoomService) AddMember(ctx context.Context, roomID, userID string, role
 	if err != nil {
 		return err
 	}
-
-	_ = s.redisCache.Del(ctx, "room:"+roomID)
+	if s.redisCache != nil {
+		_ = s.redisCache.Del(ctx, "room:"+roomID)
+	}
 	return nil
 }
 
@@ -146,8 +147,9 @@ func (s *RoomService) RemoveMember(ctx context.Context, roomID, userID string) e
 	if err != nil {
 		return err
 	}
-
-	_ = s.redisCache.Del(ctx, "room:"+roomID)
+	if s.redisCache != nil {
+		_ = s.redisCache.Del(ctx, "room:"+roomID)
+	}
 	return nil
 }
 
@@ -170,11 +172,18 @@ func (s *RoomService) JoinRoom(ctx context.Context, roomID, userID string) error
 			return ErrUserBanned
 		}
 		if member.LeftAt == nil {
-			return nil
+			return nil // already an active member
+		}
+		// member.LeftAt != nil: previously left — re-join via JoinRoomTx below
+	} else if err != nil {
+		// GetMember filters left_at IS NULL; a user who left AND was banned has no active
+		// member record but is still banned — check the full record before allowing re-join.
+		if record, _ := s.roomRepo.GetMemberRecord(ctx, roomID, userID); record != nil && record.BannedAt != nil {
+			return ErrUserBanned
 		}
 	}
 
-	if member == nil {
+	if err != nil || (member != nil && member.LeftAt != nil) {
 		newMember := &model.RoomMember{
 			RoomID:     roomID,
 			UserID:     userID,

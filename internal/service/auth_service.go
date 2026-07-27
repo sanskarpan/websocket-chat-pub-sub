@@ -352,7 +352,9 @@ func (s *AuthService) Logout(ctx context.Context, accessToken, refreshToken stri
 		claims := jwt.MapClaims{}
 		if _, _, err := parser.ParseUnverified(accessToken, claims); err == nil {
 			if jti, ok := claims["jti"].(string); ok && jti != "" {
-				_ = s.invalidateToken(ctx, jti, s.cfg.Auth.JWT.AccessTokenTTL)
+				if err := s.invalidateToken(ctx, jti, s.cfg.Auth.JWT.AccessTokenTTL); err != nil {
+					return err
+				}
 			}
 		}
 	}
@@ -360,7 +362,9 @@ func (s *AuthService) Logout(ctx context.Context, accessToken, refreshToken stri
 		claims := jwt.MapClaims{}
 		if _, _, err := parser.ParseUnverified(refreshToken, claims); err == nil {
 			if jti, ok := claims["jti"].(string); ok && jti != "" {
-				_ = s.invalidateToken(ctx, jti, s.cfg.Auth.JWT.RefreshTokenTTL)
+				if err := s.invalidateToken(ctx, jti, s.cfg.Auth.JWT.RefreshTokenTTL); err != nil {
+					return err
+				}
 			}
 		}
 	}

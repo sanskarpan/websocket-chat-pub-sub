@@ -157,7 +157,7 @@ Full protocol reference: [docs/websocket-protocol.md](docs/websocket-protocol.md
 | RS256 JWT | RSA-2048 asymmetric keys; auto-generated in dev, env-injected in prod |
 | Token revocation | Both JTIs blacklisted in Redis on logout — effective immediately |
 | Refresh rotation | Each refresh token is single-use; old JTI invalidated before new pair issued |
-| Rate limiting | Sliding-window Lua script in Redis; fail-closed on Redis outage; `Retry-After` on 429 |
+| Rate limiting | Sliding-window Lua script in Redis; fail-open on Redis error (to avoid self-DoS); `Retry-After` on 429 |
 | CORS | Config-driven (`cfg.Server.Websocket.AllowedOrigins`) — not hardcoded |
 | Password hashing | bcrypt cost 12; dummy hash run on unknown-email login to normalize timing |
 | XSS | Script tags stripped + HTML entity escape before persistence and broadcast |

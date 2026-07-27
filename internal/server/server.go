@@ -864,6 +864,12 @@ func (c *Client) handleSubscribe(ctx context.Context, msg protocol.ClientMessage
 		return
 	}
 
+	const maxRoomSubscriptions = 50
+	if len(data.RoomIDs) > maxRoomSubscriptions {
+		c.sendError(msg.ID, "INVALID_INPUT", "too many room_ids in subscribe (max 50)")
+		return
+	}
+
 	subscribed := 0
 	for _, roomID := range data.RoomIDs {
 		isMember, _ := c.roomService.IsMember(ctx, roomID, c.userID)

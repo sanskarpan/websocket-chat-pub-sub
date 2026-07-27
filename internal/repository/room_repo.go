@@ -265,6 +265,25 @@ func (r *RoomRepository) GetMembers(ctx context.Context, roomID string) ([]*mode
 	return members, nil
 }
 
+func (r *RoomRepository) GetMemberRecord(ctx context.Context, roomID, userID string) (*model.RoomMember, error) {
+	defer recordQueryDuration("get_member_record", time.Now())
+	query := `
+		SELECT room_id, user_id, role, joined_at, left_at, last_read_at, muted_until, banned_at, ban_reason, notifications
+		FROM room_members WHERE room_id = $1 AND user_id = $2
+	`
+	var member model.RoomMember
+	var notif []byte
+	err := r.db.QueryRow(ctx, query, roomID, userID).Scan(
+		&member.RoomID, &member.UserID, &member.Role, &member.JoinedAt,
+		&member.LeftAt, &member.LastReadAt, &member.MutedUntil, &member.BannedAt, &member.BanReason, &notif,
+	)
+	if err != nil {
+		return nil, err
+	}
+	_ = json.Unmarshal(notif, &member.Notifications)
+	return &member, nil
+}
+
 func (r *RoomRepository) IsMember(ctx context.Context, roomID, userID string) (bool, error) {
 	defer recordQueryDuration("is_member", time.Now())
 	query := `SELECT EXISTS(SELECT 1 FROM room_members WHERE room_id = $1 AND user_id = $2 AND left_at IS NULL)`

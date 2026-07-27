@@ -156,6 +156,11 @@ func (r *fakeRoomRepo) GetMember(_ context.Context, roomID, userID string) (*mod
 	if m, ok := r.members[roomKey(roomID, userID)]; ok && m.LeftAt == nil { return m, nil }
 	return nil, errors.New("not a member")
 }
+func (r *fakeRoomRepo) GetMemberRecord(_ context.Context, roomID, userID string) (*model.RoomMember, error) {
+	r.mu.RLock(); defer r.mu.RUnlock()
+	if m, ok := r.members[roomKey(roomID, userID)]; ok { return m, nil }
+	return nil, errors.New("no member record")
+}
 func (r *fakeRoomRepo) IsMember(_ context.Context, roomID, userID string) (bool, error) {
 	r.mu.RLock(); defer r.mu.RUnlock()
 	if m, ok := r.members[roomKey(roomID, userID)]; ok && m.LeftAt == nil { return true, nil }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"crypto/tls"
 	"fmt"
+	"hash/fnv"
 	"net/http"
 	"os"
 	"os/signal"
@@ -44,6 +45,17 @@ func main() {
 			} else {
 				logger.Info().Int64("node_id", nodeID).Msg("Snowflake node ID set from environment")
 			}
+		}
+	} else if podName := os.Getenv("MY_POD_NAME"); podName != "" {
+		// Derive a stable per-pod node ID (0-1023) from the pod name hash.
+		// Used when running as a Kubernetes Deployment where ordinals are unavailable.
+		h := fnv.New32a()
+		_, _ = h.Write([]byte(podName))
+		nodeID := int64(h.Sum32() & 0x3FF)
+		if err := snowflake.SetNodeID(nodeID); err != nil {
+			logger.Warn().Err(err).Str("pod_name", podName).Msg("Could not set Snowflake node ID from pod name")
+		} else {
+			logger.Info().Str("pod_name", podName).Int64("node_id", nodeID).Msg("Snowflake node ID derived from pod name")
 		}
 	}
 

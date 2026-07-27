@@ -13,6 +13,7 @@ import (
 	"github.com/websocket-chat/internal/model"
 	"github.com/websocket-chat/internal/pubsub"
 	"github.com/websocket-chat/internal/service"
+	"github.com/websocket-chat/pkg/sanitization"
 )
 
 type Handlers struct {
@@ -184,6 +185,16 @@ func (h *Handlers) CreateRoom(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_INPUT", "message": "Invalid room payload"})
 		return
 	}
+
+	switch model.RoomType(input.Type) {
+	case model.RoomTypeDirect, model.RoomTypeGroup, model.RoomTypeChannel:
+	default:
+		c.JSON(http.StatusBadRequest, gin.H{"code": "INVALID_INPUT", "message": "invalid room type: must be direct, group, or channel"})
+		return
+	}
+
+	input.Name = sanitization.SanitizeMessage(input.Name)
+	input.Description = sanitization.SanitizeMessage(input.Description)
 
 	uid, ok := userID(c)
 	if !ok {
