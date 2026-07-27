@@ -251,6 +251,15 @@ func (r *FakeRoomRepository) GetMember(ctx context.Context, roomID, userID strin
 	return nil, errors.New("not a member")
 }
 
+func (r *FakeRoomRepository) GetMemberRecord(ctx context.Context, roomID, userID string) (*model.RoomMember, error) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if m, ok := r.members[key(roomID, userID)]; ok {
+		return m, nil
+	}
+	return nil, errors.New("no member record")
+}
+
 func (r *FakeRoomRepository) IsMember(ctx context.Context, roomID, userID string) (bool, error) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()

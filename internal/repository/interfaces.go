@@ -27,6 +27,7 @@ type IRoomRepository interface {
 	RemoveMember(ctx context.Context, roomID, userID string) error
 	GetMembers(ctx context.Context, roomID string) ([]*model.RoomMember, error)
 	GetMember(ctx context.Context, roomID, userID string) (*model.RoomMember, error)
+	GetMemberRecord(ctx context.Context, roomID, userID string) (*model.RoomMember, error)
 	IsMember(ctx context.Context, roomID, userID string) (bool, error)
 	IncrementMemberCount(ctx context.Context, roomID string) error
 	DecrementMemberCount(ctx context.Context, roomID string) error

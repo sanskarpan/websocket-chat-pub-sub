@@ -19,6 +19,8 @@ spec:
         image: chat-server:latest
         ports:
         - containerPort: 8085
+          name: rest
+        - containerPort: 8086
           name: websocket
         - containerPort: 9090
           name: metrics
@@ -30,11 +32,22 @@ spec:
             secretKeyRef:
               name: chat-secrets
               key: db-password
-        - name: JWT_SECRET
+        - name: JWT_PRIVATE_KEY
           valueFrom:
             secretKeyRef:
               name: chat-secrets
-              key: jwt-secret
+              key: jwt-private-key
+        - name: JWT_PUBLIC_KEY
+          valueFrom:
+            secretKeyRef:
+              name: chat-secrets
+              key: jwt-public-key
+        # MY_POD_NAME lets the server derive a unique Snowflake node ID (0-1023)
+        # from a hash of the pod name when SNOWFLAKE_NODE_ID is not set explicitly.
+        - name: MY_POD_NAME
+          valueFrom:
+            fieldRef:
+              fieldPath: metadata.name
         resources:
           requests:
             memory: "256Mi"
@@ -44,13 +57,13 @@ spec:
             cpu: "500m"
         livenessProbe:
           httpGet:
-            path: /health
+            path: /healthz
             port: 8085
           initialDelaySeconds: 10
           periodSeconds: 10
         readinessProbe:
           httpGet:
-            path: /health
+            path: /readyz
             port: 8085
           initialDelaySeconds: 5
           periodSeconds: 5
@@ -70,9 +83,12 @@ spec:
   selector:
     app: chat-server
   ports:
-  - name: websocket
+  - name: rest
     port: 8085
     targetPort: 8085
+  - name: websocket
+    port: 8086
+    targetPort: 8086
   - name: metrics
     port: 9090
     targetPort: 9090
@@ -90,7 +106,7 @@ data:
       environment: "production"
     server:
       host: "0.0.0.0"
-      port: 8080
+      port: 8085
     redis:
       mode: "cluster"
       addrs:

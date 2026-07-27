@@ -26,7 +26,12 @@ func RateLimitMiddleware(ps pubsub.PubSub, actionKey string, limit int, window t
 
 		key := actionKey + ":" + identifier
 		allowed, err := ps.CheckRateLimit(c.Request.Context(), key, limit, window)
-		if err != nil || !allowed {
+		if err != nil {
+			// Redis error: fail open to avoid denying all traffic during a Redis blip.
+			c.Next()
+			return
+		}
+		if !allowed {
 			metrics.RateLimitedRequestsTotal.WithLabelValues(actionKey).Inc()
 			c.Header("Retry-After", strconv.Itoa(int(window.Seconds())))
 			c.JSON(http.StatusTooManyRequests, gin.H{
