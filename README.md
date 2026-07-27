@@ -1,604 +1,292 @@
-# WebSocket Chat Pub/Sub Server
+<p align="center">
+  <img src="docs/images/architecture.svg" alt="ws-chat architecture diagram" width="900">
+</p>
 
-[![CI/CD Pipeline](https://github.com/sanskarpan/websocket-chat-pub-sub/actions/workflows/ci.yml/badge.svg)](https://github.com/sanskarpan/websocket-chat-pub-sub/actions/workflows/ci.yml)
-[![Go Version](https://img.shields.io/badge/Go-1.23%2B-blue)](https://golang.org)
-[![License](https://img.shields.io/badge/License-MIT-green.svg)](LICENSE)
-[![Docs](https://img.shields.io/badge/docs-GitHub%20Pages-teal)](https://sanskarpan.github.io/websocket-chat-pub-sub/)
+<h1 align="center">ws-chat</h1>
 
-A high-performance, distributed, real-time WebSocket chat and Pub/Sub backend built with **Go**, **PostgreSQL**, **Redis**, **Gin**, and **Docker**. Designed for resilience under high throughput with horizontal scalability, structured logging, Prometheus observability, and robust security controls.
+<p align="center">
+  A correctness-first, horizontally scalable WebSocket chat backend in Go.<br>
+  RS256 JWT auth &nbsp;·&nbsp; Redis Pub/Sub cross-node fanout &nbsp;·&nbsp; PostgreSQL persistence &nbsp;·&nbsp; Kubernetes-ready at <code>replicas: 3</code>
+</p>
 
----
-
-## Table of Contents
-
-- [Architecture](#architecture)
-- [Quickstart](#quickstart)
-- [Configuration Reference](#configuration-reference)
-- [REST API](#rest-api)
-- [WebSocket Protocol](#websocket-protocol)
-- [Testing](#testing)
-- [Docker Deployment](#docker-deployment)
-- [Kubernetes Deployment](#kubernetes-deployment)
-- [Monitoring & Observability](#monitoring--observability)
-- [Security](#security)
-- [Project Structure](#project-structure)
-- [Contributing](#contributing)
-- [License](#license)
+<p align="center">
+  <a href="https://github.com/sanskarpan/websocket-chat-pub-sub/actions/workflows/ci.yml"><img alt="CI" src="https://github.com/sanskarpan/websocket-chat-pub-sub/actions/workflows/ci.yml/badge.svg"></a>&nbsp;
+  <a href="https://golang.org"><img alt="Go" src="https://img.shields.io/badge/Go-1.23%2B-00ADD8?logo=go&logoColor=white"></a>&nbsp;
+  <img alt="race-free" src="https://img.shields.io/badge/go%20test%20-race-2ea44f">&nbsp;
+  <a href="https://sanskarpan.github.io/websocket-chat-pub-sub/"><img alt="Docs" src="https://img.shields.io/badge/docs-GitHub%20Pages-14b8a6"></a>&nbsp;
+  <a href="LICENSE"><img alt="MIT" src="https://img.shields.io/badge/license-MIT-blue"></a>
+</p>
 
 ---
 
-## Architecture
+Most WebSocket chat tutorials wire a single server and call it done. The moment you add a second pod, messages sent to users on *other* instances silently vanish. ws-chat solves that with a Redis Pub/Sub fanout layer — every pod subscribes to the same channels, so any pod can deliver any message to any connected client. No sticky sessions required.
 
-### System Diagram
-
-```text
-                             +--------------------+
-                             |   Reverse Proxy    |
-                             |  (Nginx / Traefik) |
-                             +---------+----------+
-                                       |
-                  +--------------------+--------------------+
-                  |                                         |
-         +--------v-------+                        +--------v-------+
-         |  REST API      |                        |  WebSocket     |
-         |  (Gin Engine)  |                        |  Server (Hub)  |
-         |  Port: 8085    |                        |  Port: 8086    |
-         +--------+-------+                        +--------+-------+
-                  |                                         |
-                  +--------------------+--------------------+
-                                       |
-                  +--------------------+--------------------+
-                  |                                         |
-         +--------v-------+                        +--------v-------+
-         |  PostgreSQL    |                        |  Redis PubSub  |
-         |  (Persistent)  |                        |  & Cache       |
-         +----------------+                        +----------------+
-```
-
-### Server Components
-
-The application launches three independent HTTP servers:
-
-| Server | Default Port | Purpose |
-|--------|-------------|---------|
-| **REST API** | `8085` | Gin-based RESTful HTTP API for auth, rooms, and messages |
-| **WebSocket** | `8086` | Real-time messaging via WebSocket connections |
-| **Metrics** | `9090` | Prometheus metrics endpoint |
-
-### Pub/Sub Channel Structure
-
-Redis Pub/Sub channels used for real-time message distribution:
-
-| Channel Pattern | Purpose |
-|----------------|---------|
-| `ws:room:<roomID>` | Room message events (new, edited, deleted) |
-| `ws:room:<roomID>:events` | Room member events (joined, left) |
-| `ws:presence` | Presence update events (broadcast) |
+The secondary goal is correctness under concurrency. Every message path is verified by `go test -race`, deduplication is distributed via Redis (not a per-pod `sync.Map`), and token revocation is enforced at validation time, not just at issuance.
 
 ---
 
 ## Quickstart
 
-### Prerequisites
-
-- **Go** `1.23+`
-- **Docker & Docker Compose** `24.0+`
-- **Make** (optional)
-
-### Local Setup
-
 ```bash
-# 1. Clone and enter the repository
 git clone https://github.com/sanskarpan/websocket-chat-pub-sub.git
 cd websocket-chat-pub-sub
 
-# 2. Start PostgreSQL and Redis infrastructure
-docker compose up -d
-
-# 3. Generate JWT signing keys (required for auth)
-bash scripts/generate_keys.sh
-
-# 4. Build and start the server
-go run cmd/server/main.go
+docker compose up -d          # PostgreSQL + Redis
+bash scripts/generate_keys.sh # RSA-2048 JWT signing keys
+go run cmd/server/main.go     # REST :8085 · WebSocket :8086 · Metrics :9090
 ```
 
-The server will be available at:
-- REST API: `http://localhost:8085`
-- WebSocket: `ws://localhost:8086/ws`
-- Metrics: `http://localhost:9090/metrics`
+```bash
+go test -race ./...            # all 11 packages pass, zero data races
+```
 
 ---
 
-## Configuration Reference
+## In action
 
-All settings are configured via `configs/config.yaml` and can be overridden using environment variables.
-
-### Core Server
-
-| Environment Variable | Config Path | Type | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `SERVER_PORT` | `server.port` | int | `8085` | REST API HTTP listener port |
-| `APP_ENVIRONMENT` | `app.environment` | string | `development` | Runtime mode (`development` / `production`) |
-
-### Authentication (JWT with RS256)
-
-The server uses **RS256 asymmetric JWT signing** with RSA-2048 key pairs. Keys are auto-generated in development if not found.
-
-| Environment Variable | Config Path | Type | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `JWT_PRIVATE_KEY` | `auth.jwt.private_key_path` | string (PEM) | — | RSA private key PEM content (overrides file) |
-| `JWT_PUBLIC_KEY` | `auth.jwt.public_key_path` | string (PEM) | — | RSA public key PEM content (overrides file) |
-| `auth.jwt.private_key_path` | — | file path | `configs/jwt-private.pem` | Path to private key file |
-| `auth.jwt.public_key_path` | — | file path | `configs/jwt-public.pem` | Path to public key file |
-
-### Database
-
-| Environment Variable | Config Path | Type | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `DB_PASSWORD` | `database.postgresql.password` | string | `postgres` | PostgreSQL password (required in production) |
-
-### Redis
-
-| Environment Variable | Config Path | Type | Default | Description |
-| :--- | :--- | :--- | :--- | :--- |
-| `REDIS_PASSWORD` | `redis.password` | string | `""` | Redis connection password |
-
-### Rate Limiting
-
-| Config Path | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `rate_limit.rules[n].key` | string | — | Rate limit scope (`message`, `connection`, `room_create`) |
-| `rate_limit.rules[n].limit` | int | — | Maximum requests per window |
-| `rate_limit.rules[n].window` | duration | — | Time window (e.g. `1m`, `1h`) |
-
-### Observability
-
-| Config Path | Type | Default | Description |
-| :--- | :--- | :--- | :--- |
-| `observability.logging.level` | string | `debug` | Log level (`debug`, `info`, `warn`, `error`) |
-| `observability.logging.format` | string | `json` | Log format (`json`, `text`) |
-| `observability.metrics.port` | int | `9090` | Prometheus metrics port |
-| `observability.tracing.enabled` | bool | `false` | Enable distributed tracing |
+<p align="center">
+  <img src="docs/images/demo.gif" alt="ws-chat live demo — register, login, create room, logout" width="920">
+</p>
 
 ---
 
-## REST API
+## How it works
 
-### Health & Discovery
+**Three independent HTTP servers** start from a single binary:
 
-```http
-GET /                        # API root — service metadata and endpoint map
-GET /healthz                 # Liveness probe (always 200)
-GET /readyz                  # Readiness probe (200 if DB + Redis connected, 503 otherwise)
-GET /health                  # Alias for /readyz
+| Server | Port | Purpose |
+|---|---|---|
+| REST API | `:8085` | Gin — auth, rooms, messages |
+| WebSocket Hub | `:8086` | gorilla/websocket — real-time connections |
+| Metrics | `:9090` | Prometheus scrape target |
+
+**The Hub** is a single goroutine owning `clients`, `rooms`, and `users` maps. All mutations go through its `register`, `unregister`, and `broadcast` channels — the Go channels-over-mutexes pattern applied strictly. Each client gets a read pump goroutine and a write pump goroutine, with a 256-message buffered send channel. Slow clients are dropped immediately — no goroutine leak, no unbounded memory growth.
+
+**Redis Pub/Sub** is the cross-node glue. When Pod 1 receives a message, it persists to PostgreSQL, then publishes to `ws:room:<id>`. All pods — including Pod 1 — receive the event via their subscriptions and fan it out locally. Three channels cover all real-time events:
+
+```
+ws:room:<room_id>          →  messages, edits, deletes, reactions
+ws:room:<room_id>:events   →  member joined / left
+ws:presence                →  online / away / dnd / offline
 ```
 
-### Authentication (`/api/v1/auth`)
+Subscriptions reconnect with exponential backoff if Redis drops. PostgreSQL is the source of truth — a dropped Pub/Sub event means delayed delivery, never lost data.
 
-All auth endpoints are rate-limited (10 req/min per client).
+---
 
-#### Register
+## Authentication
 
-```http
-POST /api/v1/auth/register
-Content-Type: application/json
+**RS256 asymmetric JWT** — private key signs, public key verifies. The public key can be shared with edge proxies without granting signing ability.
 
-{
-  "username": "johndoe",
-  "email": "john@example.com",
-  "password": "securePass123!",
-  "display_name": "John Doe"
-}
-```
-
-Response `201`:
-```json
-{
-  "id": "snowflake-id",
-  "username": "johndoe",
-  "email": "john@example.com",
-  "display_name": "John Doe"
-}
-```
-
-#### Login
-
-```http
-POST /api/v1/auth/login
-Content-Type: application/json
-
-{
-  "email": "john@example.com",
-  "password": "securePass123!"
-}
-```
-
-Response `200`:
-```json
-{
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
-  "refresh_token": "dGhpcyBpcyBhIHJlZnJl...",
-  "token_type": "Bearer",
-  "expires_in": 900
-}
-```
-
-#### Refresh Token
-
-```http
-POST /api/v1/auth/refresh
-Content-Type: application/json
-
-{
-  "refresh_token": "dGhpcyBpcyBhIHJlZnJl..."
-}
-```
-
-Response `200`:
-```json
-{
-  "access_token": "eyJhbGciOiJSUzI1NiIs...",
-  "refresh_token": "bmV3IHJlZnJl...",
-  "token_type": "Bearer"
-}
-```
-
-#### Logout
+Both access tokens (15 min) and refresh tokens (7 days) carry a `jti` UUID. On `POST /api/v1/auth/logout`, both JTIs are blacklisted in Redis with TTLs matching their remaining validity. `ValidateToken` checks the blacklist on every call — logout takes effect on the very next request, not at expiry. Refresh tokens are single-use; the old JTI is invalidated before a new pair is issued.
 
 ```http
 POST /api/v1/auth/logout
 Authorization: Bearer <access_token>
 Content-Type: application/json
 
-{
-  "refresh_token": "dGhpcyBpcyBhIHJlZnJl..."
-}
+{"refresh_token": "<refresh_token>"}
 ```
-
-Response `200`:
 ```json
 {"status": "logged_out"}
 ```
 
-Blacklists the `jti` of both the access token (from the `Authorization` header) and the refresh token (from the request body). Both tokens are immediately invalid for all subsequent requests across all server replicas.
+---
 
-### Rooms (`/api/v1/rooms`)
+## REST API
 
-All room endpoints require `Authorization: Bearer <access_token>`.
+```
+GET  /healthz                         Liveness probe
+GET  /readyz                          Readiness — 503 if DB or Redis is down
 
-| Method | Path | Description |
-|--------|------|-------------|
-| `GET` | `/api/v1/rooms` | List rooms the user is a member of |
-| `POST` | `/api/v1/rooms` | Create a room (`direct`, `group`, or `channel`) |
-| `GET` | `/api/v1/rooms/:id` | Get room details |
-| `GET` | `/api/v1/rooms/:id/messages` | Get paginated messages (`?limit=N&before=RFC3339`) |
-| `POST` | `/api/v1/rooms/:id/join` | Join a room |
-| `POST` | `/api/v1/rooms/:id/leave` | Leave a room |
+POST /api/v1/auth/register            Create account
+POST /api/v1/auth/login               Authenticate, get token pair
+POST /api/v1/auth/refresh             Rotate refresh token
+POST /api/v1/auth/logout  🔒          Blacklist both JTIs immediately
 
-#### Create Room
-
-```http
-POST /api/v1/rooms
-Authorization: Bearer <access_token>
-Content-Type: application/json
-
-{
-  "name": "general",
-  "type": "channel",
-  "description": "General discussion"
-}
+GET  /api/v1/rooms        🔒          List rooms you belong to
+POST /api/v1/rooms        🔒          Create room (direct / group / channel)
+GET  /api/v1/rooms/:id    🔒          Room details
+GET  /api/v1/rooms/:id/messages 🔒   Paginated history (?limit=N&before=RFC3339)
+POST /api/v1/rooms/:id/join     🔒   Join (404 not found · 403 banned)
+POST /api/v1/rooms/:id/leave    🔒   Leave
 ```
 
-Response `201`:
-```json
-{
-  "id": "room-snowflake-id",
-  "name": "general",
-  "type": "channel",
-  "description": "General discussion",
-  "created_by": "user-snowflake-id",
-  "member_count": 1,
-  "created_at": "2026-01-01T00:00:00Z",
-  "settings": {
-    "allow_reactions": true,
-    "allow_threads": true,
-    "message_retention": 365,
-    "slow_mode_seconds": 0,
-    "require_approval": false,
-    "only_admins_can_post": false
-  }
-}
-```
-
-#### Get Messages
-
-```http
-GET /api/v1/rooms/:id/messages?limit=50&before=2026-01-01T00:00:00Z
-Authorization: Bearer <access_token>
-```
-
-Response `200`:
-```json
-[
-  {
-    "id": "msg-snowflake-id",
-    "room_id": "room-snowflake-id",
-    "user_id": "user-snowflake-id",
-    "content": "Hello world!",
-    "content_type": "text",
-    "created_at": "2026-01-01T00:00:00Z",
-    "reactions": {
-      "👍": ["user-id-1", "user-id-2"]
-    }
-  }
-]
-```
-
-#### Error Responses
-
-| Status Code | Meaning |
-|-------------|---------|
-| `400` | Invalid input / validation error |
-| `401` | Missing or invalid authentication |
-| `403` | Forbidden (not a room member) |
-| `404` | Resource not found |
-| `429` | Rate limit exceeded |
-| `500` | Internal server error |
+`🔒` = requires `Authorization: Bearer <access_token>`. Rate-limited endpoints return `Retry-After` on `429`.
 
 ---
 
-## WebSocket Protocol
+## WebSocket protocol
 
-### Connection
+Connect with the access token as a query parameter:
 
 ```
-ws://localhost:8086/ws?token=<access_token>
+ws://host:8086/ws?token=<access_token>
 ```
 
-Authentication is required via the `?token=` query parameter. Per-IP connection limit: 10 (configurable).
-
-### Message Envelope
-
-All messages (client-to-server and server-to-client) follow this structure:
+All frames use the same envelope:
 
 ```json
-{
-  "id": "snowflake-id",
-  "type": "<message-type>",
-  "timestamp": "2026-01-01T00:00:00Z",
-  "data": { ... }
-}
+{"id": "...", "type": "<type>", "timestamp": "2026-01-01T00:00:00Z", "data": { ... }}
 ```
 
-### Client-to-Server Messages
+**Client → Server**
 
-| Type | Data Fields | Description |
-|------|-------------|-------------|
-| `"subscribe"` | `{ "room_ids": [...], "presence_subscribe": [...] }` | Subscribe to rooms (must be a member) |
-| `"unsubscribe"` | `{ "room_ids": [...], "presence_subscribe": [...] }` | Unsubscribe from rooms |
-| `"message"` | `{ "room_id", "content", "client_id"?, "parent_id"? }` | Send a message (max 4000 chars) |
-| `"typing"` | `{ "room_id", "user_id" }` | Typing indicator |
-| `"read_receipt"` | `{ "room_id", "message_id", "user_id" }` | Mark message as read |
-| `"reaction"` | `{ "room_id", "message_id", "emoji", "action" (add/remove), "user_id" }` | Add/remove reaction |
-| `"edit"` | `{ "room_id", "message_id", "content" }` | Edit own message |
-| `"delete"` | `{ "room_id", "message_id" }` | Delete a message |
-| `"presence"` | `{ "status" }` (online/away/dnd/offline) | Set presence status |
-| `"ping"` | `{}` | Keep-alive ping |
+| Type | Action |
+|---|---|
+| `subscribe` | Subscribe to rooms (`room_ids`) and presence (`presence_subscribe`) |
+| `unsubscribe` | Unsubscribe from rooms |
+| `message` | Send a message — include `client_id` for dedup-safe retries |
+| `edit` / `delete` | Edit or delete a message |
+| `reaction` | Add or remove an emoji reaction |
+| `typing` / `read_receipt` / `presence` | Indicators and status |
+| `ping` | Keep-alive |
 
-### Server-to-Client Messages
+**Server → Client**
 
-| Type | Data Fields | Description |
-|------|-------------|-------------|
-| `"connection"` | `{ "user_id", "session_id" }` | Sent after successful WebSocket upgrade |
-| `"ack"` | `{ "client_msg_id", "server_msg_id"?, "status" }` | Confirmation for subscribe/message/edit/delete |
-| `"error"` | `{ "client_msg_id"?, "code", "message", "retry_after"? }` | Error response |
-| `"new_message"` | `{ "room_id", "message" }` | New message in subscribed room |
-| `"message_updated"` | `{ "room_id", "message", "action" }` | Message edited or deleted |
-| `"typing"` | `{ "room_id", "user_id" }` | User typing in subscribed room |
-| `"reaction"` | `{ "room_id", "message_id", "emoji", "action", "user_id" }` | Reaction added/removed |
-| `"presence"` | `{ "user_id", "status", "presence" }` | User presence changed |
-| `"read_receipt"` | `{ "room_id", "message_id", "user_id" }` | Message read by user |
-| `"member_joined"` | `{ "room_id", "user_id" }` | Member joined room |
-| `"member_left"` | `{ "room_id", "user_id" }` | Member left room |
-| `"pong"` | `{}` | Response to ping |
+`connection` · `ack` · `error` · `new_message` · `message_updated` · `typing` · `reaction` · `presence` · `read_receipt` · `member_joined` · `member_left` · `pong`
 
-### WebSocket Error Codes
-
-| Code | Description |
-|------|-------------|
-| `UNKNOWN_TYPE` | Unrecognized message type |
-| `INVALID_INPUT` | Missing or malformed fields |
-| `CONTENT_TOO_LONG` | Message exceeds 4000 characters |
-| `FORBIDDEN` | Not a member of the target room |
-| `NOT_SUBSCRIBED` | Must subscribe before sending messages |
-| `EDIT_FAILED` | Could not edit the message |
-| `DELETE_FAILED` | Could not delete the message |
-
----
-
-## Testing
-
-### Unit & Integration Tests
-
-Run unit tests and integration tests (no external dependencies required):
-
-```bash
-go test -race -v ./...
-```
-
-### End-to-End Tests
-
-E2E tests require PostgreSQL, Redis, and the server running. Build tag: `e2e`.
-
-```bash
-# 1. Start infrastructure
-docker compose up -d
-
-# 2. Generate JWT keys
-bash scripts/generate_keys.sh
-
-# 3. Build and start the server
-go build -o server ./cmd/server && ./server &
-sleep 2
-
-# 4. Run E2E tests
-go test -race -v -tags=e2e ./test/e2e/...
-
-# 5. Cleanup
-kill %1
-docker compose down
-```
-
-### Lint & Security
-
-```bash
-# Static analysis
-golangci-lint run
-
-# Vulnerability scan
-govulncheck ./...
-```
-
----
-
-## Docker Deployment
-
-### Building the Image
-
-```bash
-docker build -t websocket-chat:latest -f Dockerfile .
-```
-
-### Running with Docker
-
-```bash
-docker run -p 8085:8085 -p 8086:8086 -p 9090:9090 \
-  -e APP_ENVIRONMENT=production \
-  -e DB_PASSWORD="your-db-password" \
-  -v $(pwd)/configs/jwt-private.pem:/app/configs/jwt-private.pem:ro \
-  -v $(pwd)/configs/jwt-public.pem:/app/configs/jwt-public.pem:ro \
-  websocket-chat:latest
-```
-
-### Docker Compose
-
-```bash
-docker compose up -d --build
-```
-
----
-
-## Kubernetes Deployment
-
-Deploy to Kubernetes using the provided manifests:
-
-```bash
-# Apply all manifests
-kubectl apply -f deployments/kubernetes/
-
-# Check status
-kubectl get pods,services
-```
-
-The deployment includes:
-- `deployment.yaml` — Application deployment with resource limits, probes, and config
-- `service.yaml` — Internal ClusterIP service
-- Auto-scaling based on CPU/memory usage
-
----
-
-## Monitoring & Observability
-
-### Health Endpoints
-
-| Endpoint | Type | Expected Status |
-|----------|------|-----------------|
-| `GET /healthz` | Liveness | `200 OK` |
-| `GET /readyz` | Readiness | `200 OK` (DB + Redis connected) |
-
-### Prometheus Metrics (`:9090/metrics`)
-
-| Metric | Type | Description |
-|--------|------|-------------|
-| `websocket_connections_active` | Gauge | Active WebSocket connections |
-| `room_subscriptions_active` | Gauge | Active room subscriptions |
-| `websocket_messages_sent_total` | Counter | Messages sent through WebSocket |
-| `websocket_messages_received_total` | Counter | Messages received from WebSocket |
-| `auth_attempts_total` | Counter | Auth attempts by status |
-| `rate_limited_requests_total` | Counter | Rate-limited requests by key |
-| `db_query_duration_seconds` | Histogram | Database query latency |
-| `redis_operation_duration_seconds` | Histogram | Redis operation latency |
-
-### Structured Logging
-
-All logs are output as JSON with the following fields:
-- `level` — Log level (`debug`, `info`, `warn`, `error`)
-- `timestamp` — ISO 8601 timestamp
-- `request_id` — Correlation ID for request tracing
-- `component` — Source component
-- `duration` — Request processing time
+Full protocol reference: [docs/websocket-protocol.md](docs/websocket-protocol.md)
 
 ---
 
 ## Security
 
-- **RS256 JWT**: Asymmetric RSA-2048 signing keys (auto-generated in dev, injected via env vars in prod)
-- **Token Blacklisting on Logout**: `POST /api/v1/auth/logout` blacklists both access and refresh token JTIs in Redis; tokens are invalid immediately on all replicas
-- **Refresh Token Rotation**: each refresh token is single-use; the old JTI is blacklisted before a new pair is issued
-- **`Retry-After` on Rate Limit**: every `429` response includes a `Retry-After` header with the cooldown seconds
-- **Config-Driven CORS**: allowed origins come from `cfg.Server.Websocket.AllowedOrigins` — not hardcoded
-- **Timing-Attack Mitigation**: Login always runs bcrypt even when the email is not found, to normalize response timing
-- **Fail-Closed Rate Limiting**: denies requests when Redis is unreachable
-- **Password Hashing**: bcrypt with cost factor 12
-- **XSS Protection**: script tags stripped before HTML entity escaping
-- **Distributed Message Deduplication**: `client_id` checked against Redis (not in-memory) — works correctly across k8s replicas
-- **Sentinel Errors**: `ErrRoomNotFound` → 404, `ErrUserBanned` → 403 — no 500 leakage for domain errors
-- **Config Validation**: production mode enforces explicit JWT keys and database password
-- **Graceful Shutdown**: 30-second context timeout with ordered server shutdown
+| Control | Implementation |
+|---|---|
+| RS256 JWT | RSA-2048 asymmetric keys; auto-generated in dev, env-injected in prod |
+| Token revocation | Both JTIs blacklisted in Redis on logout — effective immediately |
+| Refresh rotation | Each refresh token is single-use; old JTI invalidated before new pair issued |
+| Rate limiting | Sliding-window Lua script in Redis; fail-closed on Redis outage; `Retry-After` on 429 |
+| CORS | Config-driven (`cfg.Server.Websocket.AllowedOrigins`) — not hardcoded |
+| Password hashing | bcrypt cost 12; dummy hash run on unknown-email login to normalize timing |
+| XSS | Script tags stripped + HTML entity escape before persistence and broadcast |
+| Dedup | `client_id` checked against Redis `SET NX EX 300` — works across all pods |
+| Domain errors | `ErrRoomNotFound` → 404, `ErrUserBanned` → 403; no 500 leakage |
 
 ---
 
-## Project Structure
+## Configuration
+
+All settings in `configs/config.yaml`, overridable via environment variables:
+
+```bash
+APP_ENVIRONMENT=production   # enforces explicit JWT keys + DB password
+JWT_PRIVATE_KEY=<PEM>        # RSA private key content
+JWT_PUBLIC_KEY=<PEM>         # RSA public key content
+DB_PASSWORD=<password>       # PostgreSQL password
+REDIS_ADDR=host:6379         # Redis address
+```
+
+Full reference: [docs/configuration.md](docs/configuration.md)
+
+---
+
+## Deployment
+
+```bash
+# Docker
+docker build -t websocket-chat:latest .
+docker run -p 8085:8085 -p 8086:8086 -p 9090:9090 \
+  -e APP_ENVIRONMENT=production \
+  -e JWT_PRIVATE_KEY="$(cat configs/jwt-private.pem)" \
+  -e JWT_PUBLIC_KEY="$(cat configs/jwt-public.pem)" \
+  -e DB_PASSWORD="..." \
+  websocket-chat:latest
+
+# Kubernetes (replicas: 3 — no sticky sessions needed)
+kubectl apply -f deployments/kubernetes/
+kubectl get pods,services
+```
+
+No sticky sessions — any pod handles any client and delivers all messages via Redis fanout. Set `terminationGracePeriodSeconds: 35` to give the 30-second graceful drain enough time.
+
+Full manifests + TLS + secrets: [docs/deployment.md](docs/deployment.md)
+
+---
+
+## Observability
+
+| Metric | Type |
+|---|---|
+| `websocket_connections_active` | Gauge |
+| `websocket_messages_sent_total` | Counter |
+| `auth_attempts_total{status}` | Counter |
+| `rate_limited_requests_total{key}` | Counter |
+| `db_query_duration_seconds` | Histogram |
+| `redis_operation_duration_seconds` | Histogram |
+
+Scrape `:9090/metrics`. Health probes: `GET /healthz` (liveness) and `GET /readyz` (readiness — 503 if DB or Redis is down). Logs are structured JSON via zerolog with `request_id`, `component`, `duration_ms`.
+
+Full metrics, alerting rules, and Grafana panel queries: [docs/monitoring.md](docs/monitoring.md)
+
+---
+
+## Testing
+
+```bash
+go test -race ./...                       # unit + integration, no infra needed
+
+# E2E (requires docker compose up -d first)
+go test -race -v -tags=e2e ./test/e2e/...
+```
+
+**11 packages · 0 data races · 3 test layers:**
+
+- **Unit** (`internal/...`) — fake in-memory repos, real services; covers auth blacklisting, JTI revocation, token rotation, dedup, sentinel error mapping, Hub shutdown under concurrency
+- **Integration** (`test/integration`) — real Gin router + real services + fake repos; 9 tests including logout → 401 verification and JoinRoom 404/403 correctness
+- **E2E** (`test/e2e`, `//go:build e2e`) — live server; includes `TestE2E_Logout` with 5 sub-tests
+
+---
+
+## Project structure
 
 ```
-├── cmd/server/main.go           # Application entry point
-├── internal/
-│   ├── config/                  # Configuration loading & validation
-│   ├── handlers/                # HTTP & WebSocket request handlers
-│   ├── logging/                 # Structured logging setup
-│   ├── metrics/                 # Prometheus metric definitions
-│   ├── middleware/              # HTTP middleware (CORS, rate-limit, auth, request ID)
-│   ├── model/                   # Domain models (User, Message, Room, Presence)
-│   ├── protocol/                # WebSocket message types & constants
-│   ├── pubsub/                  # Redis Pub/Sub implementation
-│   ├── repository/              # Database access layer (PostgreSQL)
-│   ├── server/                  # WebSocket server (hub, connection management)
-│   ├── service/                 # Business logic layer
-│   └── tracing/                 # Distributed tracing spans
-├── pkg/
-│   ├── sanitization/            # XSS sanitization utilities
-│   └── snowflake/               # Snowflake ID generation
-├── test/
-│   ├── e2e/                     # End-to-end tests
-│   └── integration/             # Integration tests
-├── configs/
-│   └── config.yaml              # Application configuration
-├── deployments/kubernetes/      # Kubernetes manifests
-├── scripts/
-│   └── generate_keys.sh         # RSA key generation script
-├── Dockerfile                   # Production Docker image
-├── docker-compose.yaml          # Local development services
-└── .github/workflows/ci.yml     # CI/CD pipeline
+cmd/server/main.go        entry point — wires deps, starts 3 servers
+internal/
+  config/                 YAML config + env overrides + production validation
+  handlers/               HTTP handlers (30+ tests in handlers_test.go)
+  middleware/             CORS, rate-limit (sliding window), auth, request-ID
+  model/                  User · Room · Message · Presence domain types
+  protocol/               WebSocket message types and constants
+  pubsub/                 Redis Pub/Sub + rate limit Lua + dedup + presence
+  repository/             PostgreSQL via pgx/v5
+  server/                 WebSocket Hub + Client (read/write pumps)
+  service/                AuthService · RoomService · MessageService
+pkg/
+  sanitization/           XSS strip + HTML entity escape
+  snowflake/              Snowflake ID generator
+test/
+  e2e/                    E2E tests (//go:build e2e)
+  integration/            Integration tests
+configs/config.yaml       Full application configuration
+deployments/kubernetes/   k8s deployment, service, HPA manifests
+docs/                     GitHub Pages source (MkDocs Material)
 ```
 
 ---
 
-## Contributing
+## Documentation
 
-Please see [CONTRIBUTING.md](CONTRIBUTING.md) for branch policies, PR workflows, and code formatting guidelines.
+Full documentation at **[sanskarpan.github.io/websocket-chat-pub-sub](https://sanskarpan.github.io/websocket-chat-pub-sub/)**
+
+| | |
+|---|---|
+| [Quickstart](docs/quickstart.md) | Clone → docker compose → first WebSocket message in 5 min |
+| [Architecture](docs/architecture.md) | Hub/client pattern, Redis fanout, data flow diagrams |
+| [REST API](docs/rest-api.md) | Full endpoint reference with request/response examples |
+| [WebSocket Protocol](docs/websocket-protocol.md) | All C2S/S2C types, sequence diagrams, error codes |
+| [Authentication](docs/authentication.md) | RS256, JTI blacklisting, logout, refresh rotation |
+| [Configuration](docs/configuration.md) | Every knob, env override, production checklist |
+| [Deployment](docs/deployment.md) | Docker, Kubernetes, TLS, rolling updates |
+| [Monitoring](docs/monitoring.md) | Prometheus metrics, alerting rules, pprof |
+| [Security](docs/security.md) | Full threat model and security control inventory |
+| [Testing](docs/testing.md) | Unit, integration, E2E layers with fake patterns |
+| [Runbook](docs/runbook.md) | On-call playbook — 6 failure modes with diagnosis steps |
+| [ADR Index](docs/adr/index.md) | 4 architecture decision records |
 
 ---
 
 ## License
 
-Distributed under the MIT License. See [LICENSE](LICENSE) for details.
+MIT — see [LICENSE](LICENSE)
