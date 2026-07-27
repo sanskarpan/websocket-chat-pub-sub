@@ -45,7 +45,7 @@ go test -race ./...            # all 11 packages pass, zero data races
 ## In action
 
 <p align="center">
-  <img src="docs/images/demo.gif" alt="ws-chat live demo — register, login, create room, logout" width="920">
+  <img src="docs/images/demo.png" alt="ws-chat REST API demo — readyz, register, login, create room, logout, revoked token" width="920">
 </p>
 
 ---
